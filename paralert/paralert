@@ -55,6 +55,9 @@ Usage:
 
 Commands:
   send        Send an alert notification email
+  check-disk  Check disk usage and alert if a threshold is exceeded
+  run         Run a command and alert if it exits non-zero
+  cron        Configure an alert cron job (see \`check-disk\` and \`run\`)
   config      Show or set configuration (SMTP)
   help        Show this help message
 
@@ -63,14 +66,28 @@ Command-specific options:
     --subject <text>   Email subject
     --body <text>      Email body ('-' or omitted = read from stdin)
 
+  check-disk:
+    --threshold <pct>  Alert when usage is at or above this percent (default: 90)
+    --path <path>      Filesystem to check (default: /)
+
+  run:
+    --subject <text>   Alert subject used when the command fails
+    -- <command>       Command to run; an alert is sent if it exits non-zero
+
+  cron:
+    (no args)          Interactively add a cron job (Disk Usage or Custom)
+    show               List paralert cron entries
+    remove             Interactively remove a paralert cron entry
+
   config:
     set                Interactively configure SMTP notifications
 
 Examples:
   $script_name config set
-  $script_name config
   $script_name send --subject "Backup FAILED" --body "See log."
-  echo "details" | $script_name send --subject "Backup FAILED"
+  $script_name check-disk --threshold 90
+  $script_name run --subject "Cert renew failed" -- certbot renew
+  $script_name cron
 
 Configuration is stored in $config_file.
 EOF
@@ -169,6 +186,13 @@ _send_email() {
   fi
 }
 
+# Load config (if any) and send an alert email. Silently no-ops when SMTP is
+# not configured (see _send_email).
+_alert() {
+  load_config || true
+  _send_email "$1" "$2"
+}
+
 command_send() {
   local subject=""
   local body=""
@@ -200,10 +224,82 @@ command_send() {
     body="$(cat)"
   fi
 
-  # Load config for ALERT_* settings; if absent, _send_email skips silently
-  load_config || true
+  _alert "$subject" "$body"
+}
 
-  _send_email "$subject" "$body"
+command_check_disk() {
+  local threshold=90
+  local path="/"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --threshold)
+        threshold="$2"
+        shift 2
+        ;;
+      --path)
+        path="$2"
+        shift 2
+        ;;
+      -h | --help)
+        print_help
+        exit 0
+        ;;
+      *)
+        fail_help "Unknown option '$1' for check-disk command"
+        ;;
+    esac
+  done
+
+  local usage
+  usage="$(df -P "$path" 2> /dev/null | awk 'NR==2 { gsub(/%/, "", $5); print $5 }')"
+  if [[ -z "$usage" ]]; then
+    fail "Could not determine disk usage for '$path'."
+  fi
+
+  if [[ "$usage" -ge "$threshold" ]]; then
+    local host
+    host="$(hostname 2> /dev/null || echo unknown)"
+    _alert "[paralert] Disk usage ${usage}% on ${host} (${path})" "$(df -h "$path")"
+  fi
+}
+
+command_run() {
+  local subject="Scheduled command failed"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --subject)
+        subject="$2"
+        shift 2
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -h | --help)
+        print_help
+        exit 0
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+
+  if [[ $# -eq 0 ]]; then
+    fail "No command given. Usage: $script_name run --subject <text> -- <command> [args...]"
+  fi
+
+  local out rc
+  set +e
+  out="$("$@" 2>&1)"
+  rc=$?
+  set -e
+
+  if [[ $rc -ne 0 ]]; then
+    _alert "[paralert] ${subject} (exit ${rc})" "$out"
+  fi
 }
 
 config_set() {
@@ -258,6 +354,149 @@ command_config() {
   esac
 }
 
+_choose_schedule() {
+  local choice
+  choice="$(gum choose \
+    "Every 15 minutes" \
+    "Every hour" \
+    "All six hours" \
+    "Daily at 08:00" \
+    "Daily at midnight" \
+    "Custom")"
+
+  case "$choice" in
+    "Every 15 minutes") echo "*/15 * * * *" ;;
+    "Every hour") echo "0 * * * *" ;;
+    "All six hours") echo "0 */6 * * *" ;;
+    "Daily at 08:00") echo "0 8 * * *" ;;
+    "Daily at midnight") echo "0 0 * * *" ;;
+    "Custom")
+      local s
+      s="$(gum input --placeholder "0 8 * * *" --header "Enter cron schedule (5 fields)")"
+      [[ -n "$s" ]] || fail "No schedule provided."
+      echo "$s"
+      ;;
+    *)
+      fail "No schedule selected."
+      ;;
+  esac
+}
+
+# Add or replace a crontab line identified by its trailing marker.
+_install_cron_line() {
+  local marker="$1"
+  local cron_line="$2"
+
+  local current new
+  current="$(crontab -l 2> /dev/null || true)"
+
+  if echo "$current" | grep -q "${marker}$"; then
+    new="$(echo "$current" | grep -v "${marker}$" || true)"
+    info "Updating existing cron entry ($marker)."
+  else
+    new="$current"
+  fi
+
+  if [[ -n "$new" ]]; then
+    new="${new}
+${cron_line}"
+  else
+    new="$cron_line"
+  fi
+
+  echo "$new" | crontab -
+  info "Cron entry installed: ${cron_line}"
+}
+
+_cron_add() {
+  local self="$1"
+  local kind
+  kind="$(gum choose "Disk Usage" "Custom")"
+
+  case "$kind" in
+    "Disk Usage")
+      local schedule threshold path
+      schedule="$(_choose_schedule)"
+      threshold="$(gum input --value "90" --header "Alert when disk usage % is at or above")"
+      [[ -n "$threshold" ]] || fail "No threshold provided."
+      path="$(gum input --value "/" --header "Filesystem path to check")"
+      [[ -n "$path" ]] || path="/"
+      _install_cron_line "# paralert:disk" \
+        "${schedule} ${self} check-disk --threshold ${threshold} --path ${path} # paralert:disk"
+      ;;
+    "Custom")
+      local schedule subject command slug
+      schedule="$(_choose_schedule)"
+      subject="$(gum input --header "Alert subject" --placeholder "My check failed")"
+      [[ -n "$subject" ]] || fail "No subject provided."
+      command="$(gum input --header "Command to run (alert is sent if it exits non-zero)" \
+        --placeholder "/usr/local/bin/mycheck --flag")"
+      [[ -n "$command" ]] || fail "No command provided."
+      slug="$(echo "$subject" | tr '[:upper:]' '[:lower:]' | tr -cs '[:alnum:]' '-' | sed 's/^-//;s/-$//')"
+      [[ -n "$slug" ]] || slug="custom"
+      _install_cron_line "# paralert:custom-${slug}" \
+        "${schedule} ${self} run --subject \"${subject}\" -- ${command} # paralert:custom-${slug}"
+      ;;
+    *)
+      fail "No type selected."
+      ;;
+  esac
+}
+
+_cron_remove() {
+  local current entries
+  current="$(crontab -l 2> /dev/null || true)"
+  entries="$(echo "$current" | grep "# paralert:" || true)"
+
+  if [[ -z "$entries" ]]; then
+    info "No paralert cron entries found."
+    return 0
+  fi
+
+  local choice
+  choice="$(echo "$entries" | gum choose)"
+  [[ -n "$choice" ]] || {
+    info "Nothing selected."
+    return 0
+  }
+
+  local new
+  new="$(echo "$current" | grep -vF "$choice" || true)"
+  if [[ -n "$new" ]]; then
+    echo "$new" | crontab -
+  else
+    crontab -r 2> /dev/null || true
+  fi
+  info "Removed cron entry."
+}
+
+command_cron() {
+  local subcmd="${1:-}"
+  local self
+  self="$(readlink -f "$0")"
+
+  case "$subcmd" in
+    show)
+      local entries
+      entries="$(crontab -l 2> /dev/null | grep "# paralert:" || true)"
+      if [[ -z "$entries" ]]; then
+        info "No paralert cron entries found."
+      else
+        echo "$entries"
+      fi
+      ;;
+    remove)
+      _cron_remove
+      ;;
+    "")
+      _cron_add "$self"
+      ;;
+    *)
+      fail_help "Unknown cron subcommand '$subcmd'. Use 'cron', 'cron show', or 'cron remove'."
+      ;;
+  esac
+}
+
 main() {
   local command="${1:-help}"
   [[ $# -gt 0 ]] && shift
@@ -265,6 +504,15 @@ main() {
   case "$command" in
     send)
       command_send "$@"
+      ;;
+    check-disk)
+      command_check_disk "$@"
+      ;;
+    run)
+      command_run "$@"
+      ;;
+    cron)
+      command_cron "$@"
       ;;
     config)
       command_config "$@"

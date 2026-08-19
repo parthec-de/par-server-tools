@@ -258,3 +258,79 @@ EOF
 
   rm -rf "$home_dir"
 }
+
+#
+# Tests: check-disk
+#
+
+@test "check-disk: alerts when usage is at or above the threshold" {
+  mailpit_clear
+
+  local home_dir
+  home_dir="$(mktemp -d /tmp/paralert-test-home-XXXXXX)"
+  write_paralert_config "$home_dir"
+
+  # threshold 0 => usage is always >= 0 => alert
+  env HOME="$home_dir" "$PARALERT" check-disk --threshold 0
+
+  sleep 1
+  [ "$(mailpit_message_count)" -ge 1 ]
+  [[ "$(mailpit_latest_subject)" == *"Disk usage"* ]]
+  # Body carries `df -h` output (locale-independent check: the usage column has a %)
+  [[ "$(mailpit_latest_body)" == *"%"* ]]
+
+  rm -rf "$home_dir"
+}
+
+@test "check-disk: no alert when usage is below the threshold" {
+  mailpit_clear
+
+  local home_dir
+  home_dir="$(mktemp -d /tmp/paralert-test-home-XXXXXX)"
+  write_paralert_config "$home_dir"
+
+  # threshold 101 => usage can never reach it => no alert
+  env HOME="$home_dir" "$PARALERT" check-disk --threshold 101
+
+  sleep 1
+  [ "$(mailpit_message_count)" -eq 0 ]
+
+  rm -rf "$home_dir"
+}
+
+#
+# Tests: run
+#
+
+@test "run: alerts with command output when the command exits non-zero" {
+  mailpit_clear
+
+  local home_dir
+  home_dir="$(mktemp -d /tmp/paralert-test-home-XXXXXX)"
+  write_paralert_config "$home_dir"
+
+  env HOME="$home_dir" "$PARALERT" run --subject "boom check" -- sh -c 'echo FAIL_OUTPUT_XYZ; exit 3'
+
+  sleep 1
+  [ "$(mailpit_message_count)" -ge 1 ]
+  [[ "$(mailpit_latest_subject)" == *"boom check"* ]]
+  [[ "$(mailpit_latest_subject)" == *"exit 3"* ]]
+  [[ "$(mailpit_latest_body)" == *"FAIL_OUTPUT_XYZ"* ]]
+
+  rm -rf "$home_dir"
+}
+
+@test "run: no alert when the command succeeds" {
+  mailpit_clear
+
+  local home_dir
+  home_dir="$(mktemp -d /tmp/paralert-test-home-XXXXXX)"
+  write_paralert_config "$home_dir"
+
+  env HOME="$home_dir" "$PARALERT" run --subject "should not fire" -- true
+
+  sleep 1
+  [ "$(mailpit_message_count)" -eq 0 ]
+
+  rm -rf "$home_dir"
+}

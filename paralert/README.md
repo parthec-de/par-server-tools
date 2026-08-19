@@ -50,6 +50,42 @@ paralert send --subject "Backup FAILED" --body "See attached log."
 cat run.log | paralert send --subject "Backup FAILED"
 ```
 
+### Disk usage check
+
+Alert when the usage of a filesystem reaches a threshold (default `/`, 90%):
+
+```bash
+paralert check-disk --threshold 90 --path /
+```
+
+Nothing is sent while usage stays below the threshold.
+
+### Run a command and alert on failure
+
+Run any command; if it exits non-zero, paralert sends an alert with the captured
+output as the body:
+
+```bash
+paralert run --subject "Cert renew failed" -- certbot renew
+```
+
+### Scheduled checks (cron)
+
+`paralert cron` interactively installs a cron job that alerts via paralert. Pick
+between two types — you choose the schedule and, respectively, the disk-usage
+threshold or the command to run:
+
+- **Disk Usage** — schedule + threshold; runs `check-disk` on that schedule.
+- **Custom** — schedule + subject + command; runs `run` (alert on non-zero exit).
+
+```bash
+paralert cron          # add a cron job interactively
+paralert cron show     # list paralert cron entries
+paralert cron remove   # remove one interactively
+```
+
+Entries are tagged with a `# paralert:<type>` marker in your crontab.
+
 ## Development
 
 A MailPit-based test stack is included in `./test/`.
