@@ -140,6 +140,7 @@ Command-specific options:
   ls:
     [prefix]           Optional prefix to filter backups (e.g. project name)
     --tree             Display results as a directory tree
+    --timestamps       List backups as <epoch>\t<key> per line
 
   cleanup:
     --dry-run          Show which backups would be deleted, without deleting
