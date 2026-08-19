@@ -1,0 +1,281 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+install_pkg() {
+  sudo apt update && sudo apt install $1
+}
+
+install_gum() {
+  sudo mkdir -p /etc/apt/keyrings
+  test -f /etc/apt/keyrings/charm.gpg \
+    || curl -fsSL https://repo.charm.sh/apt/gpg.key \
+      | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+  test -f /etc/apt/sources.list.d/charm.list \
+    || echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
+      | sudo tee /etc/apt/sources.list.d/charm.list
+  install_pkg "gum"
+}
+
+script_name="paralert"
+script_version="1.0.0"
+config_dir="${HOME}/.config/par"
+config_file="${config_dir}/paralert.conf"
+
+info() {
+  gum log -l info -- "$1"
+}
+
+warn() {
+  gum log -l warn -- "$1"
+}
+
+error() {
+  gum log -l error -- "$1"
+}
+
+fail() {
+  error "$1"
+  exit 1
+}
+
+fail_help() {
+  error "$1"
+  echo ""
+  print_help
+  exit 1
+}
+
+print_help() {
+  cat << EOF
+$script_name v$script_version -- alert notifications for par server tools
+
+Usage:
+  $script_name <command> [options]
+
+Commands:
+  send        Send an alert notification email
+  config      Show or set configuration (SMTP)
+  help        Show this help message
+
+Command-specific options:
+  send:
+    --subject <text>   Email subject
+    --body <text>      Email body ('-' or omitted = read from stdin)
+
+  config:
+    set                Interactively configure SMTP notifications
+
+Examples:
+  $script_name config set
+  $script_name config
+  $script_name send --subject "Backup FAILED" --body "See log."
+  echo "details" | $script_name send --subject "Backup FAILED"
+
+Configuration is stored in $config_file.
+EOF
+}
+
+mask_secret() {
+  local value="$1"
+  if [[ ${#value} -le 4 ]]; then
+    echo "****"
+  else
+    echo "${value:0:4}****"
+  fi
+}
+
+_sq() {
+  # Escape a value for safe use inside single quotes: replace ' with '\''
+  printf '%s' "${1//\'/\'\\\'\'}"
+}
+
+load_config() {
+  if [[ ! -f "$config_file" ]]; then
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  source "$config_file"
+}
+
+save_config() {
+  mkdir -p "$config_dir"
+  cat > "$config_file" << EOF
+# paralert configuration
+ALERT_SMTP_HOST='$(_sq "${ALERT_SMTP_HOST:-}")'
+ALERT_SMTP_PORT='$(_sq "${ALERT_SMTP_PORT:-587}")'
+ALERT_SMTP_USER='$(_sq "${ALERT_SMTP_USER:-}")'
+ALERT_SMTP_PASSWORD='$(_sq "${ALERT_SMTP_PASSWORD:-}")'
+ALERT_SMTP_FROM='$(_sq "${ALERT_SMTP_FROM:-}")'
+ALERT_RECIPIENTS='$(_sq "${ALERT_RECIPIENTS:-}")'
+EOF
+  chmod 600 "$config_file"
+  info "Config saved to $config_file"
+}
+
+# Send a notification email via SMTP using curl.
+# Requires ALERT_SMTP_HOST, ALERT_SMTP_PORT, ALERT_SMTP_FROM, and ALERT_RECIPIENTS to be set.
+# ALERT_SMTP_USER / ALERT_SMTP_PASSWORD are optional (skipped if empty = no auth).
+_send_email() {
+  local subject="$1"
+  local body="$2"
+
+  # Silently skip if alert SMTP is not configured
+  if [[ -z "${ALERT_SMTP_HOST:-}" || -z "${ALERT_SMTP_FROM:-}" || -z "${ALERT_RECIPIENTS:-}" ]]; then
+    return 0
+  fi
+
+  local smtp_port="${ALERT_SMTP_PORT:-587}"
+  local smtp_url="smtp://${ALERT_SMTP_HOST}:${smtp_port}"
+
+  # Build recipient list for curl (one --mail-rcpt per address)
+  local -a rcpt_args=()
+  local to_header=""
+  IFS=',' read -ra recipients <<< "$ALERT_RECIPIENTS"
+  for rcpt in "${recipients[@]}"; do
+    rcpt="$(echo "$rcpt" | xargs)"
+    rcpt_args+=(--mail-rcpt "$rcpt")
+    if [[ -n "$to_header" ]]; then
+      to_header+=", $rcpt"
+    else
+      to_header="$rcpt"
+    fi
+  done
+
+  # Build auth args (skip if no user configured)
+  local -a auth_args=()
+  if [[ -n "${ALERT_SMTP_USER:-}" ]]; then
+    auth_args+=(--user "${ALERT_SMTP_USER}:${ALERT_SMTP_PASSWORD:-}")
+  fi
+
+  local hostname
+  hostname="$(hostname 2> /dev/null || cat /etc/hostname 2> /dev/null || echo "unknown")"
+
+  # Compose email with CRLF line endings throughout (RFC 2822 requires \r\n)
+  # First build the body with LF, then convert all LF to CRLF at the end.
+  local raw
+  raw="$(printf 'From: %s\nTo: %s\nSubject: %s\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\n--\nHost: %s\nDate: %s\n' \
+    "$ALERT_SMTP_FROM" "$to_header" "$subject" "$body" "$hostname" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+  local message
+  message="$(printf '%s' "$raw" | sed 's/$/\r/')"
+
+  if ! curl --silent --show-error \
+    --url "$smtp_url" \
+    --mail-from "$ALERT_SMTP_FROM" \
+    "${rcpt_args[@]}" \
+    "${auth_args[@]}" \
+    -T - <<< "$message" 2>&1; then
+    error "Failed to send notification email"
+  fi
+}
+
+command_send() {
+  local subject=""
+  local body=""
+  local body_set=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --subject)
+        subject="$2"
+        shift 2
+        ;;
+      --body)
+        body="$2"
+        body_set=true
+        shift 2
+        ;;
+      -h | --help)
+        print_help
+        exit 0
+        ;;
+      *)
+        fail_help "Unknown option '$1' for send command"
+        ;;
+    esac
+  done
+
+  # Read body from stdin when not passed explicitly (or when passed as '-')
+  if [[ "$body_set" != true || "$body" == "-" ]]; then
+    body="$(cat)"
+  fi
+
+  # Load config for ALERT_* settings; if absent, _send_email skips silently
+  load_config || true
+
+  _send_email "$subject" "$body"
+}
+
+config_set() {
+  info "Configuring alert notifications..."
+
+  ALERT_SMTP_HOST="$(gum input --placeholder "smtp.example.com" \
+    --header "SMTP Host" --value "${ALERT_SMTP_HOST:-}")"
+  ALERT_SMTP_PORT="$(gum input --placeholder "587" \
+    --header "SMTP Port" --value "${ALERT_SMTP_PORT:-587}")"
+  ALERT_SMTP_USER="$(gum input --placeholder "user@example.com (leave empty for no auth)" \
+    --header "SMTP User" --value "${ALERT_SMTP_USER:-}")"
+  ALERT_SMTP_PASSWORD="$(gum input --placeholder "password" --password \
+    --header "SMTP Password" --value "${ALERT_SMTP_PASSWORD:-}")"
+  ALERT_SMTP_FROM="$(gum input --placeholder "backups@example.com" \
+    --header "From address" --value "${ALERT_SMTP_FROM:-}")"
+  ALERT_RECIPIENTS="$(gum input --placeholder "admin@example.com,ops@example.com" \
+    --header "Error recipients (comma-separated)" --value "${ALERT_RECIPIENTS:-}")"
+
+  save_config
+}
+
+command_config() {
+  local subcmd="${1:-}"
+
+  # Load existing config to preserve values when saving
+  load_config || true
+
+  case "$subcmd" in
+    set)
+      config_set
+      ;;
+
+    "")
+      if [[ ! -f "$config_file" ]]; then
+        warn "No config found at $config_file"
+        info "Run '$script_name config set' to configure."
+        return 0
+      fi
+      echo "Config: $config_file"
+      echo ""
+      echo "ALERT_SMTP_HOST     = ${ALERT_SMTP_HOST:-<not set>}"
+      echo "ALERT_SMTP_PORT     = ${ALERT_SMTP_PORT:-<not set>}"
+      echo "ALERT_SMTP_USER     = ${ALERT_SMTP_USER:-<not set>}"
+      echo "ALERT_SMTP_PASSWORD = $(mask_secret "${ALERT_SMTP_PASSWORD:-}")"
+      echo "ALERT_SMTP_FROM     = ${ALERT_SMTP_FROM:-<not set>}"
+      echo "ALERT_RECIPIENTS    = ${ALERT_RECIPIENTS:-<not set>}"
+      ;;
+
+    *)
+      fail_help "Unknown config subcommand '$subcmd'. Use 'config' or 'config set'."
+      ;;
+  esac
+}
+
+main() {
+  local command="${1:-help}"
+  [[ $# -gt 0 ]] && shift
+
+  case "$command" in
+    send)
+      command_send "$@"
+      ;;
+    config)
+      command_config "$@"
+      ;;
+    help | -h | --help)
+      print_help
+      ;;
+    *)
+      fail_help "Unknown command '$command'."
+      ;;
+  esac
+}
+
+main "$@"

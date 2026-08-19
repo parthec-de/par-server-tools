@@ -6,6 +6,12 @@ TEST_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")" && pwd)"
 PARBACKUP="${TEST_DIR}/../parbackup"
 COMPOSE_FILE="${TEST_DIR}/docker-compose.yaml"
 
+# parbackup delegates alerting to the standalone paralert tool and assumes it is
+# installed on the host PATH. paralert lives in the sibling tool directory, so
+# put it on PATH here to make it discoverable in the tests.
+PATH="$(cd "${TEST_DIR}/../../paralert" && pwd):${PATH}"
+export PATH
+
 MINIO_ENDPOINT="http://localhost:29000"
 MINIO_ACCESS_KEY="minioadmin"
 MINIO_SECRET_KEY="minioadmin"
@@ -145,10 +151,10 @@ mailpit_latest_raw() {
   curl -sf "${MAILPIT_API}/api/v1/message/${id}/raw"
 }
 
-# Write a test config with alert settings pointing to MailPit (with auth)
+# Write a paralert config with alert settings pointing to MailPit (with auth)
 write_alert_config() {
   local config_dir="$1"
-  cat > "${config_dir}/.config/par/parbackup.conf" << 'CONF'
+  cat > "${config_dir}/.config/par/paralert.conf" << 'CONF'
 ALERT_SMTP_HOST='localhost'
 ALERT_SMTP_PORT='21025'
 ALERT_SMTP_USER='backups@test.local'
@@ -458,7 +464,6 @@ teardown_file() {
   # Write a config with a dollar sign in a value (simulates save_config output)
   cat > "${cfg_dir}/.config/par/parbackup.conf" << 'EOF'
 S3_SECRET_KEY='pa$$w0rd$FZ=x'
-ALERT_SMTP_PASSWORD='h3llo$WORLD!'
 EOF
 
   # Source it via the script's load_config by running `parbackup config`
@@ -467,7 +472,6 @@ EOF
 
   # The dollar signs must survive round-trip without expansion
   [[ "$output" == *'pa$$'* ]]
-  [[ "$output" == *'h3ll'* ]]
 
   rm -rf "$cfg_dir"
 }
@@ -970,7 +974,7 @@ EOF
   local email_config_dir
   email_config_dir="$(mktemp -d /tmp/parbackup-test-email-XXXXXX)"
   mkdir -p "${email_config_dir}/.config/par"
-  cat > "${email_config_dir}/.config/par/parbackup.conf" << 'EOF'
+  cat > "${email_config_dir}/.config/par/paralert.conf" << 'EOF'
 ALERT_SMTP_HOST='localhost'
 ALERT_SMTP_PORT='21025'
 ALERT_SMTP_USER='backups@test.local'
@@ -1234,6 +1238,8 @@ S3_ENDPOINT="http://localhost:19999"
 S3_BUCKET="nonexistent"
 S3_ACCESS_KEY="bogus"
 S3_SECRET_KEY="bogus"
+EOF
+  cat > "${cfg_dir}/.config/par/paralert.conf" << 'EOF'
 ALERT_SMTP_HOST='localhost'
 ALERT_SMTP_PORT='21025'
 ALERT_SMTP_USER='backups@test.local'

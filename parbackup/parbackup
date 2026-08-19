@@ -125,7 +125,7 @@ Commands:
   ls          List available backups on S3
   cleanup     Delete backups older than retention period
   cron        Manage cron schedule for automated backups
-  config      Show or set configuration (S3, alert)
+  config      Show or set configuration (S3)
   updateself  Update $script_name script
   help        Show this help message
 
@@ -162,11 +162,9 @@ Command-specific options:
 
   config:
     set                Interactively configure S3 backend
-    set alert          Interactively configure alert email notifications
 
 Examples:
   parbackup config set
-  parbackup config set alert
   parbackup config
   parbackup create
   parbackup create --local
@@ -259,62 +257,6 @@ mask_secret() {
     echo "****"
   else
     echo "${value:0:4}****"
-  fi
-}
-
-# Send an error notification email via SMTP using curl.
-# Requires ALERT_SMTP_HOST, ALERT_SMTP_PORT, ALERT_SMTP_FROM, and ALERT_RECIPIENTS to be set.
-# ALERT_SMTP_USER / ALERT_SMTP_PASSWORD are optional (skipped if empty = no auth).
-send_error_email() {
-  local subject="$1"
-  local body="$2"
-
-  # Silently skip if alert SMTP is not configured
-  if [[ -z "${ALERT_SMTP_HOST:-}" || -z "${ALERT_SMTP_FROM:-}" || -z "${ALERT_RECIPIENTS:-}" ]]; then
-    return 0
-  fi
-
-  local smtp_port="${ALERT_SMTP_PORT:-587}"
-  local smtp_url="smtp://${ALERT_SMTP_HOST}:${smtp_port}"
-
-  # Build recipient list for curl (one --mail-rcpt per address)
-  local -a rcpt_args=()
-  local to_header=""
-  IFS=',' read -ra recipients <<< "$ALERT_RECIPIENTS"
-  for rcpt in "${recipients[@]}"; do
-    rcpt="$(echo "$rcpt" | xargs)"
-    rcpt_args+=(--mail-rcpt "$rcpt")
-    if [[ -n "$to_header" ]]; then
-      to_header+=", $rcpt"
-    else
-      to_header="$rcpt"
-    fi
-  done
-
-  # Build auth args (skip if no user configured)
-  local -a auth_args=()
-  if [[ -n "${ALERT_SMTP_USER:-}" ]]; then
-    auth_args+=(--user "${ALERT_SMTP_USER}:${ALERT_SMTP_PASSWORD:-}")
-  fi
-
-  local hostname
-  hostname="$(hostname 2> /dev/null || cat /etc/hostname 2> /dev/null || echo "unknown")"
-
-  # Compose email with CRLF line endings throughout (RFC 2822 requires \r\n)
-  # First build the body with LF, then convert all LF to CRLF at the end.
-  local raw
-  raw="$(printf 'From: %s\nTo: %s\nSubject: %s\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\n--\nHost: %s\nDate: %s\n' \
-    "$ALERT_SMTP_FROM" "$to_header" "$subject" "$body" "$hostname" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
-  local message
-  message="$(printf '%s' "$raw" | sed 's/$/\r/')"
-
-  if ! curl --silent --show-error \
-    --url "$smtp_url" \
-    --mail-from "$ALERT_SMTP_FROM" \
-    "${rcpt_args[@]}" \
-    "${auth_args[@]}" \
-    -T - <<< "$message" 2>&1; then
-    error "Failed to send error notification email"
   fi
 }
 
@@ -782,9 +724,11 @@ $(cat "$RUN_LOG_FILE")"
 Check the backup host for details."
     fi
 
-    send_error_email \
-      "[parbackup] Backup FAILED for '${deployment_name}'" \
-      "$body"
+    # Delegate alerting to the standalone paralert tool (assumed installed on PATH).
+    # Never let a missing/failing alert abort the exit handler.
+    paralert send \
+      --subject "[parbackup] Backup FAILED for '${deployment_name}'" \
+      --body "$body" || true
   fi
   # Reset trap to avoid re-triggering
   trap - EXIT
@@ -816,9 +760,6 @@ command_create() {
   # Require S3 config unless --local
   if [[ "$local_only" != true ]]; then
     require_config
-  else
-    # In local mode, still try to load config for alert settings (non-fatal)
-    load_config || true
   fi
 
   # Set up error notification: on non-zero exit, send an email alert
@@ -937,12 +878,6 @@ S3_BUCKET='$(_sq "${S3_BUCKET:-}")'
 S3_ACCESS_KEY='$(_sq "${S3_ACCESS_KEY:-}")'
 S3_SECRET_KEY='$(_sq "${S3_SECRET_KEY:-}")'
 RETENTION_DAYS='$(_sq "${RETENTION_DAYS:-7}")'
-ALERT_SMTP_HOST='$(_sq "${ALERT_SMTP_HOST:-}")'
-ALERT_SMTP_PORT='$(_sq "${ALERT_SMTP_PORT:-587}")'
-ALERT_SMTP_USER='$(_sq "${ALERT_SMTP_USER:-}")'
-ALERT_SMTP_PASSWORD='$(_sq "${ALERT_SMTP_PASSWORD:-}")'
-ALERT_SMTP_FROM='$(_sq "${ALERT_SMTP_FROM:-}")'
-ALERT_RECIPIENTS='$(_sq "${ALERT_RECIPIENTS:-}")'
 EOF
   chmod 600 "$config_file"
   info "Config saved to $config_file"
@@ -965,25 +900,6 @@ config_set_s3() {
   save_config
 }
 
-config_set_alert() {
-  info "Configuring alert notifications..."
-
-  ALERT_SMTP_HOST="$(gum input --placeholder "smtp.example.com" \
-    --header "SMTP Host" --value "${ALERT_SMTP_HOST:-}")"
-  ALERT_SMTP_PORT="$(gum input --placeholder "587" \
-    --header "SMTP Port" --value "${ALERT_SMTP_PORT:-587}")"
-  ALERT_SMTP_USER="$(gum input --placeholder "user@example.com (leave empty for no auth)" \
-    --header "SMTP User" --value "${ALERT_SMTP_USER:-}")"
-  ALERT_SMTP_PASSWORD="$(gum input --placeholder "password" --password \
-    --header "SMTP Password" --value "${ALERT_SMTP_PASSWORD:-}")"
-  ALERT_SMTP_FROM="$(gum input --placeholder "backups@example.com" \
-    --header "From address" --value "${ALERT_SMTP_FROM:-}")"
-  ALERT_RECIPIENTS="$(gum input --placeholder "admin@example.com,ops@example.com" \
-    --header "Error recipients (comma-separated)" --value "${ALERT_RECIPIENTS:-}")"
-
-  save_config
-}
-
 command_config() {
   local subcmd="${1:-}"
   local section="${2:-}"
@@ -997,11 +913,8 @@ command_config() {
         s3 | "")
           config_set_s3
           ;;
-        alert)
-          config_set_alert
-          ;;
         *)
-          fail_help "Unknown config section '$section'. Use 'config set', 'config set s3', or 'config set alert'."
+          fail_help "Unknown config section '$section'. Use 'config set' or 'config set s3'."
           ;;
       esac
       ;;
@@ -1019,17 +932,10 @@ command_config() {
       echo "S3_ACCESS_KEY    = $(mask_secret "${S3_ACCESS_KEY:-}")"
       echo "S3_SECRET_KEY    = $(mask_secret "${S3_SECRET_KEY:-}")"
       echo "RETENTION_DAYS   = ${RETENTION_DAYS:-<not set>}"
-      echo ""
-      echo "ALERT_SMTP_HOST     = ${ALERT_SMTP_HOST:-<not set>}"
-      echo "ALERT_SMTP_PORT     = ${ALERT_SMTP_PORT:-<not set>}"
-      echo "ALERT_SMTP_USER     = ${ALERT_SMTP_USER:-<not set>}"
-      echo "ALERT_SMTP_PASSWORD = $(mask_secret "${ALERT_SMTP_PASSWORD:-}")"
-      echo "ALERT_SMTP_FROM     = ${ALERT_SMTP_FROM:-<not set>}"
-      echo "ALERT_RECIPIENTS    = ${ALERT_RECIPIENTS:-<not set>}"
       ;;
 
     *)
-      fail_help "Unknown config subcommand '$subcmd'. Use 'config', 'config set', or 'config set alert'."
+      fail_help "Unknown config subcommand '$subcmd'. Use 'config' or 'config set'."
       ;;
   esac
 }

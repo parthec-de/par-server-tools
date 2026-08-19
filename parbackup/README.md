@@ -195,24 +195,21 @@ Each cron entry is tagged with a `# parbackup:<BACKUP_NAME>` marker so entries c
 
 ### Error notifications
 
-If a backup fails (during creation or S3 upload), an error notification email is sent via SMTP. The email includes the exit code, failing line number, and the full run log content (if available). Configure it interactively:
+If a backup fails (during creation or S3 upload), parbackup delegates alerting to
+[**paralert**](../paralert/), which sends an error notification email via SMTP. The
+email includes the exit code, failing line number, and the full run log content (if
+available). parbackup assumes `paralert` is installed on the host `PATH`; if it is
+missing or unconfigured, the failure is reported as usual and the alert is silently
+skipped.
+
+Configure notifications via paralert:
 
 ```bash
-parbackup config set alert
+paralert config set
 ```
 
-This stores the following settings in `~/.config/par/parbackup.conf`:
-
-| Variable              | Description                                      |
-| --------------------- | ------------------------------------------------ |
-| `ALERT_SMTP_HOST`     | SMTP server hostname                             |
-| `ALERT_SMTP_PORT`     | SMTP server port (default: `587`)                |
-| `ALERT_SMTP_USER`     | SMTP username (leave empty for no authentication)|
-| `ALERT_SMTP_PASSWORD` | SMTP password                                    |
-| `ALERT_SMTP_FROM`     | Sender address for notification emails           |
-| `ALERT_RECIPIENTS`    | Comma-separated list of recipient addresses      |
-
-Emails are sent using `curl` (no additional dependencies). If alert SMTP is not configured, error notifications are silently skipped.
+See the [paralert README](../paralert/README.md) for the available SMTP settings
+(stored in `~/.config/par/paralert.conf`).
 
 ## Development
 

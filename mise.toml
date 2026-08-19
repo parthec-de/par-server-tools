@@ -2,3 +2,12 @@
 description = "Run parbackup bats integration tests"
 dir = "parbackup"
 run = "bats test/test.bats"
+
+[tasks."test:paralert"]
+description = "Run paralert bats integration tests"
+dir = "paralert"
+run = "bats test/test.bats"
+
+[tasks.test]
+description = "Run all tool test suites"
+depends = ["test:parbackup", "test:paralert"]
