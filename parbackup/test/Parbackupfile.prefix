@@ -1,0 +1,9 @@
+# Parbackupfile - Test (prefix collision test)
+# BACKUP_NAME is intentionally a prefix of "test_deployment"
+# to verify cron operations don't clobber similarly-named entries.
+
+BACKUP_NAME="test"
+
+SERVICES="dummy"
+DUMMY_TYPE="local_dir"
+DUMMY_LOCAL_DIR="/tmp"

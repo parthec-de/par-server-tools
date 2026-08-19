@@ -1,0 +1,1458 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+install_pkg() {
+  sudo apt update && sudo apt install $1
+}
+
+install_gum() {
+  sudo mkdir -p /etc/apt/keyrings
+  test -f /etc/apt/keyrings/charm.gpg \
+    || curl -fsSL https://repo.charm.sh/apt/gpg.key \
+      | sudo gpg --dearmor -o /etc/apt/keyrings/charm.gpg
+  test -f /etc/apt/sources.list.d/charm.list \
+    || echo "deb [signed-by=/etc/apt/keyrings/charm.gpg] https://repo.charm.sh/apt/ * *" \
+      | sudo tee /etc/apt/sources.list.d/charm.list
+  install_pkg "gum"
+}
+
+script_name="parbackup"
+script_version="1.4.2"
+script_dir="$(dirname "$(readlink -f "$0")")"
+script_invocation="$0 $*"
+parbackupfile_name="${PARBACKUPFILE:-Parbackupfile}"
+config_dir="${HOME}/.config/par"
+config_file="${config_dir}/parbackup.conf"
+color_primary="#2e509e"
+color_secondary="#2b2c32"
+working_dir="/tmp/parbackup"
+run_log_dir="${working_dir}/runs"
+
+ensure_working_dir() {
+  mkdir -p "$working_dir"
+}
+
+print_banner() {
+  gum style \
+    --border normal --margin "1" --padding "1 2" \
+    --border-background "$color_secondary" \
+    --border-foreground "$color_primary" \
+    --background "$color_primary" \
+    --foreground "$color_secondary" \
+    "par digital e.K. -- Backup Manager" \
+    "v$script_version"
+}
+
+BACKUP_LOG_FILE=""
+RUN_LOG_FILE=""
+
+_log_to_file() {
+  local level="$1"
+  local msg="$2"
+  local ts
+  ts="$(date '+%Y-%m-%d %H:%M:%S')"
+  if [[ -n "$BACKUP_LOG_FILE" ]]; then
+    echo "$ts [$level] $msg" >> "$BACKUP_LOG_FILE"
+  fi
+  if [[ -n "$RUN_LOG_FILE" ]]; then
+    echo "$ts [$level] $msg" >> "$RUN_LOG_FILE"
+  fi
+}
+
+# Append lines from stdin to BACKUP_LOG_FILE and RUN_LOG_FILE with a prefix, while also
+# passing them through to stderr.
+# Usage: some_command 2>&1 | _tee_to_log "prefix"
+#   or:  some_command 2> >(_tee_to_log "pg_dump")
+_tee_to_log() {
+  local prefix="$1"
+  if [[ -n "$BACKUP_LOG_FILE" || -n "$RUN_LOG_FILE" ]]; then
+    while IFS= read -r line; do
+      echo "$line" >&2
+      local ts
+      ts="$(date '+%Y-%m-%d %H:%M:%S')"
+      if [[ -n "$BACKUP_LOG_FILE" ]]; then
+        echo "$ts [$prefix] $line" >> "$BACKUP_LOG_FILE"
+      fi
+      if [[ -n "$RUN_LOG_FILE" ]]; then
+        echo "$ts [$prefix] $line" >> "$RUN_LOG_FILE"
+      fi
+    done
+  else
+    cat >&2
+  fi
+}
+
+info() {
+  gum log -l info -- "$1"
+  _log_to_file "INFO" "$1"
+}
+
+warn() {
+  gum log -l warn -- "$1"
+  _log_to_file "WARN" "$1"
+}
+
+error() {
+  gum log -l error -- "$1"
+  _log_to_file "ERROR" "$1"
+}
+
+fail() {
+  error "$1"
+  exit 1
+}
+
+fail_parse_options() {
+  fail "Failed to parse options"
+}
+
+fail_help() {
+  error "$1"
+  echo ""
+  print_help
+  exit 1
+}
+
+print_help() {
+  cat << EOF
+Usage: parbackup <command> [options]
+
+Commands:
+  create      Create a backup and upload to S3
+  download    Download a backup from S3
+  restore     Restore a backup from archive or directory
+  ls          List available backups on S3
+  cleanup     Delete backups older than retention period
+  cron        Manage cron schedule for automated backups
+  config      Show or set configuration (S3, alert)
+  updateself  Update $script_name script
+  help        Show this help message
+
+Options:
+  -h, --help  Show help message
+
+Command-specific options:
+  create:
+    --local            Skip S3 upload (no config needed)
+    -f, --file <path>  Path to Parbackupfile (default: ./Parbackupfile)
+
+  ls:
+    [prefix]           Optional prefix to filter backups (e.g. project name)
+    --tree             Display results as a directory tree
+
+  cleanup:
+    --dry-run          Show which backups would be deleted, without deleting
+
+  cron:
+    -f, --file <path>  Path to Parbackupfile (required for add/remove)
+    show               List all parbackup cron entries
+    remove             Remove cron entry for the given Parbackupfile
+
+  download:
+    <backup_ref>       S3 key of the backup to download
+    --pick             Interactively choose a backup from S3 to download
+    -f, --force        Overwrite existing local file without prompting
+
+  restore:
+    <backup_ref>       S3 key of the backup (default), or local path with --local
+    --pick             Interactively choose a backup from S3 to restore
+    --local            Restore from local .tar.gz or directory instead of S3
+    -f, --force        Skip confirmation prompt
+
+  config:
+    set                Interactively configure S3 backend
+    set alert          Interactively configure alert email notifications
+
+Examples:
+  parbackup config set
+  parbackup config set alert
+  parbackup config
+  parbackup create
+  parbackup create --local
+  parbackup create -f /opt/my-project/Parbackupfile
+  parbackup download --pick
+  parbackup download my_project/my_project-2026-02-27_14-30-22.tar.gz
+  parbackup restore --pick
+  parbackup restore my_project/my_project-2026-02-27_14-30-22.tar.gz
+  parbackup restore --local /tmp/parbackup/my_project-2026-02-27_14-30-22.tar.gz
+  parbackup restore --local --force /tmp/parbackup/my_project-2026-02-27_14-30-22.tar.gz
+  parbackup ls
+  parbackup ls my_project/
+  parbackup cron -f /opt/my-project/Parbackupfile
+  parbackup cron show
+  parbackup cron remove -f /opt/my-project/Parbackupfile
+EOF
+}
+
+# Load and validate an Parbackupfile.
+# Usage: require_parbackupfile [path]
+# If no path is given, looks for ./Parbackupfile in the current directory.
+require_parbackupfile() {
+  local backupfile="${1:-./$parbackupfile_name}"
+
+  if [[ ! -f "$backupfile" ]]; then
+    fail "No $parbackupfile_name found at '$backupfile'"
+  fi
+
+  info "Loading $backupfile..."
+  # shellcheck source=/dev/null
+  source "$backupfile"
+
+  # Validate required top-level variables
+  if [[ -z "${BACKUP_NAME:-}" ]]; then
+    fail "BACKUP_NAME is not set in $backupfile"
+  fi
+  if [[ -z "${SERVICES:-}" ]]; then
+    fail "SERVICES is not set in $backupfile"
+  fi
+}
+
+# Resolve a per-service variable. Usage: get_svc_var <service_name> <var_suffix>
+# Example: get_svc_var "app_db" "TYPE" reads the variable APP_DB_TYPE
+get_svc_var() {
+  local svc_name="$1"
+  local var_suffix="$2"
+  local var_name="${svc_name^^}_${var_suffix}"
+  echo "${!var_name:-}"
+}
+
+# Validate that a required per-service variable is set.
+require_svc_var() {
+  local svc_name="$1"
+  local var_suffix="$2"
+  local value
+  value="$(get_svc_var "$svc_name" "$var_suffix")"
+  if [[ -z "$value" ]]; then
+    fail "Missing required variable ${svc_name^^}_${var_suffix} for service '$svc_name'"
+  fi
+  echo "$value"
+}
+
+# --- Config ---
+
+load_config() {
+  if [[ ! -f "$config_file" ]]; then
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  source "$config_file"
+}
+
+require_config() {
+  if ! load_config; then
+    fail "No config found at $config_file. Run 'parbackup config set' to configure S3."
+  fi
+  local missing=()
+  [[ -z "${S3_ENDPOINT:-}" ]] && missing+=("S3_ENDPOINT")
+  [[ -z "${S3_BUCKET:-}" ]] && missing+=("S3_BUCKET")
+  [[ -z "${S3_ACCESS_KEY:-}" ]] && missing+=("S3_ACCESS_KEY")
+  [[ -z "${S3_SECRET_KEY:-}" ]] && missing+=("S3_SECRET_KEY")
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    fail "Missing config variables in $config_file: ${missing[*]}"
+  fi
+}
+
+mask_secret() {
+  local value="$1"
+  if [[ ${#value} -le 4 ]]; then
+    echo "****"
+  else
+    echo "${value:0:4}****"
+  fi
+}
+
+# Send an error notification email via SMTP using curl.
+# Requires ALERT_SMTP_HOST, ALERT_SMTP_PORT, ALERT_SMTP_FROM, and ALERT_RECIPIENTS to be set.
+# ALERT_SMTP_USER / ALERT_SMTP_PASSWORD are optional (skipped if empty = no auth).
+send_error_email() {
+  local subject="$1"
+  local body="$2"
+
+  # Silently skip if alert SMTP is not configured
+  if [[ -z "${ALERT_SMTP_HOST:-}" || -z "${ALERT_SMTP_FROM:-}" || -z "${ALERT_RECIPIENTS:-}" ]]; then
+    return 0
+  fi
+
+  local smtp_port="${ALERT_SMTP_PORT:-587}"
+  local smtp_url="smtp://${ALERT_SMTP_HOST}:${smtp_port}"
+
+  # Build recipient list for curl (one --mail-rcpt per address)
+  local -a rcpt_args=()
+  local to_header=""
+  IFS=',' read -ra recipients <<< "$ALERT_RECIPIENTS"
+  for rcpt in "${recipients[@]}"; do
+    rcpt="$(echo "$rcpt" | xargs)"
+    rcpt_args+=(--mail-rcpt "$rcpt")
+    if [[ -n "$to_header" ]]; then
+      to_header+=", $rcpt"
+    else
+      to_header="$rcpt"
+    fi
+  done
+
+  # Build auth args (skip if no user configured)
+  local -a auth_args=()
+  if [[ -n "${ALERT_SMTP_USER:-}" ]]; then
+    auth_args+=(--user "${ALERT_SMTP_USER}:${ALERT_SMTP_PASSWORD:-}")
+  fi
+
+  local hostname
+  hostname="$(hostname 2> /dev/null || cat /etc/hostname 2> /dev/null || echo "unknown")"
+
+  # Compose email with CRLF line endings throughout (RFC 2822 requires \r\n)
+  # First build the body with LF, then convert all LF to CRLF at the end.
+  local raw
+  raw="$(printf 'From: %s\nTo: %s\nSubject: %s\nContent-Type: text/plain; charset=UTF-8\n\n%s\n\n--\nHost: %s\nDate: %s\n' \
+    "$ALERT_SMTP_FROM" "$to_header" "$subject" "$body" "$hostname" "$(date '+%Y-%m-%d %H:%M:%S %Z')")"
+  local message
+  message="$(printf '%s' "$raw" | sed 's/$/\r/')"
+
+  if ! curl --silent --show-error \
+    --url "$smtp_url" \
+    --mail-from "$ALERT_SMTP_FROM" \
+    "${rcpt_args[@]}" \
+    "${auth_args[@]}" \
+    -T - <<< "$message" 2>&1; then
+    error "Failed to send error notification email"
+  fi
+}
+
+install_s3cmd() {
+  if command -v s3cmd > /dev/null; then
+    return 0
+  fi
+  info "Installing s3cmd..."
+  install_pkg "s3cmd"
+}
+
+install_rsync() {
+  if command -v rsync > /dev/null; then
+    return 0
+  fi
+  info "Installing rsync..."
+  install_pkg "rsync"
+}
+
+s3_cmd() {
+  install_s3cmd
+
+  local host
+  host="$(echo "$S3_ENDPOINT" | sed 's|https\?://||')"
+
+  local -a extra_args=()
+  if [[ "$S3_ENDPOINT" == http://* ]]; then
+    # Explicitly add `--no-ssl`, if we're dealing with an HTTP endpoint.
+    extra_args+=(--no-ssl)
+  fi
+
+  s3cmd \
+    --access_key="$S3_ACCESS_KEY" \
+    --secret_key="$S3_SECRET_KEY" \
+    --host="$host" \
+    --host-bucket="$host/%(bucket)" \
+    "${extra_args[@]}" \
+    "$@"
+}
+
+s3_upload() {
+  local local_path="$1"
+  local s3_key="$2"
+
+  s3_cmd put "$local_path" "s3://${S3_BUCKET}/${s3_key}" 2> >(_tee_to_log "s3 upload")
+}
+
+s3_download() {
+  local s3_key="$1"
+  local local_path="$2"
+
+  s3_cmd get "s3://${S3_BUCKET}/${s3_key}" "$local_path" 2> >(_tee_to_log "s3 download")
+}
+
+s3_list() {
+  local prefix="${1:-}"
+
+  s3_cmd ls "s3://${S3_BUCKET}/${prefix}" 2> >(_tee_to_log "s3 ls")
+}
+
+# --- Backup/Restore helpers ---
+
+backup_postgres() {
+  local svc_name="$1"
+  local target_dir="$2"
+
+  local container db_user db_password db_name
+
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  db_user="$(require_svc_var "$svc_name" "USER")"
+  db_password="$(require_svc_var "$svc_name" "PASSWORD")"
+  db_name="$(require_svc_var "$svc_name" "DB")"
+
+  local dump_file="${target_dir}/dump.sql"
+
+  info "  Dumping Postgres database '$db_name' from container '$container'..."
+
+  docker exec -e PGPASSWORD="$db_password" "$container" \
+    pg_dump -U "$db_user" "$db_name" > "$dump_file" \
+    2> >(_tee_to_log "pg_dump") \
+    || fail "pg_dump failed in container '$container' (is pg_dump installed?)"
+
+  info "  Postgres dump saved to $dump_file"
+}
+
+backup_mongo() {
+  local svc_name="$1"
+  local target_dir="$2"
+
+  local container db_user db_password db_name
+
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  db_user="$(require_svc_var "$svc_name" "USER")"
+  db_password="$(require_svc_var "$svc_name" "PASSWORD")"
+  db_name="$(require_svc_var "$svc_name" "DB")"
+
+  local dump_file="${target_dir}/dump.archive"
+
+  info "  Dumping MongoDB database '$db_name' from container '$container'..."
+
+  docker exec "$container" \
+    mongodump \
+      --username "$db_user" \
+      --password "$db_password" \
+      --authenticationDatabase admin \
+      --db "$db_name" \
+      --archive > "$dump_file" \
+    2> >(_tee_to_log "mongodump") \
+    || fail "mongodump failed in container '$container' (is mongodump installed?)"
+
+  info "  MongoDB dump saved to $dump_file"
+}
+
+restore_postgres() {
+  local svc_name="$1"
+  local source_dir="$2"
+
+  local container db_user db_password db_name
+
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  db_user="$(require_svc_var "$svc_name" "USER")"
+  db_password="$(require_svc_var "$svc_name" "PASSWORD")"
+  db_name="$(require_svc_var "$svc_name" "DB")"
+
+  local dump_file="${source_dir}/dump.sql"
+
+  if [[ ! -f "$dump_file" ]]; then
+    fail "Postgres dump file not found: $dump_file"
+  fi
+
+  info "  Restoring Postgres database '$db_name' in container '$container'..."
+
+  # Drop and recreate the database to ensure a clean restore.
+  # Connect to template1 to avoid "cannot drop the currently open database" error.
+  # Terminate active connections to the target database first.
+  docker exec -e PGPASSWORD="$db_password" "$container" \
+    psql -U "$db_user" -d template1 \
+      -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$db_name' AND pid <> pg_backend_pid();" \
+      -c "DROP DATABASE IF EXISTS \"$db_name\";" \
+      -c "CREATE DATABASE \"$db_name\";" \
+    || fail "Failed to drop/recreate database '$db_name' in container '$container'"
+
+  docker exec -i -e PGPASSWORD="$db_password" "$container" \
+    psql -U "$db_user" -d "$db_name" < "$dump_file" \
+    || fail "psql restore failed for database '$db_name' in container '$container'"
+
+  info "  Postgres restore complete for '$db_name'"
+}
+
+restore_mongo() {
+  local svc_name="$1"
+  local source_dir="$2"
+
+  local container db_user db_password db_name
+
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  db_user="$(require_svc_var "$svc_name" "USER")"
+  db_password="$(require_svc_var "$svc_name" "PASSWORD")"
+  db_name="$(require_svc_var "$svc_name" "DB")"
+
+  local dump_file="${source_dir}/dump.archive"
+
+  if [[ ! -f "$dump_file" ]]; then
+    fail "MongoDB dump file not found: $dump_file"
+  fi
+
+  info "  Restoring MongoDB database '$db_name' in container '$container'..."
+
+  # Drop the database first to ensure a clean restore
+  docker exec "$container" \
+    mongosh -u "$db_user" -p "$db_password" --authenticationDatabase admin \
+      --quiet --eval "db.getSiblingDB('$db_name').dropDatabase()" \
+    || fail "Failed to drop MongoDB database '$db_name' in container '$container'"
+
+  docker exec -i "$container" \
+    mongorestore \
+      --username "$db_user" \
+      --password "$db_password" \
+      --authenticationDatabase admin \
+      --drop \
+      --archive < "$dump_file" \
+    || fail "mongorestore failed for database '$db_name' in container '$container'"
+
+  info "  MongoDB restore complete for '$db_name'"
+}
+
+backup_volume() {
+  local svc_name="$1"
+  local target_dir="$2"
+
+  local container path
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  path="$(require_svc_var "$svc_name" "PATH")"
+
+  info "  Copying '$path' from container '$container'..."
+
+  docker cp "$container:$path/." "$target_dir/" \
+    2> >(_tee_to_log "docker cp") \
+    || fail "docker cp failed for '$path' from container '$container'"
+
+  info "  Volume data saved to $target_dir"
+}
+
+restore_volume() {
+  local svc_name="$1"
+  local source_dir="$2"
+
+  local container path
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  path="$(require_svc_var "$svc_name" "PATH")"
+
+  info "  Restoring '$path' in container '$container'..."
+
+  # Clear existing files, then copy backup contents into the volume
+  docker exec "$container" sh -c "rm -rf '${path:?}/'*" \
+    || fail "Failed to clear '$path' in container '$container'"
+  docker cp "$source_dir/." "$container:$path/" \
+    || fail "docker cp failed for '$path' into container '$container'"
+
+  info "  Volume restore complete for '$path'"
+}
+
+backup_dir() {
+  local svc_name="$1"
+  local target_dir="$2"
+
+  local dir_path
+  dir_path="$(require_svc_var "$svc_name" "PATH")"
+
+  if [[ ! -d "$dir_path" ]]; then
+    fail "Directory '$dir_path' does not exist"
+  fi
+
+  info "  Copying '$dir_path'..."
+
+  cp -a "$dir_path/." "$target_dir/" \
+    2> >(_tee_to_log "cp")
+
+  info "  Directory saved to $target_dir"
+}
+
+restore_dir() {
+  local svc_name="$1"
+  local source_dir="$2"
+
+  local dir_path
+  dir_path="$(require_svc_var "$svc_name" "PATH")"
+
+  info "  Restoring '$dir_path'..."
+
+  install_rsync
+
+  # Sync backup contents into target, deleting extraneous files
+  rsync -a --delete "$source_dir/" "$dir_path/"
+
+  info "  Directory restore complete for '$dir_path'"
+}
+
+command_updateself() {
+  info "Updating $script_name..."
+  pushd "$script_dir" > /dev/null
+  git pull
+  popd > /dev/null
+  info "Done."
+}
+
+command_ls() {
+  local tree=false
+  local timestamps=false
+  local prefix=""
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --tree)
+        tree=true
+        shift
+        ;;
+      --timestamps)
+        timestamps=true
+        shift
+        ;;
+      *)
+        prefix="$1"
+        shift
+        ;;
+    esac
+  done
+
+  require_config
+
+  info "Listing backups on s3://${S3_BUCKET}/${prefix}..."
+
+  local file_list
+  file_list="$(s3_cmd ls --recursive "s3://${S3_BUCKET}/${prefix}" 2> >(_tee_to_log "s3 ls"))"
+
+  if [[ -z "$file_list" ]]; then
+    info "No backups found."
+    return 0
+  fi
+
+  if [[ "$timestamps" == true ]]; then
+    # Output: <epoch>\t<key> — timestamp from s3cmd ls date columns
+    while IFS= read -r line; do
+      local file_date file_key epoch
+      file_date="$(echo "$line" | awk '{print $1, $2}')"
+      file_key="$(echo "$line" | awk '{print $NF}' | cut -d/ -f4-)"
+      epoch="$(date -d "$file_date" +%s 2> /dev/null || true)"
+      [[ -n "$epoch" ]] && echo -e "${epoch}\t${file_key}"
+    done <<< "$file_list"
+  else
+    # Extract plain keys from s3cmd output (strip s3://bucket/ prefix)
+    local keys
+    keys="$(echo "$file_list" | awk '{print $NF}' | cut -d/ -f4-)"
+
+    if [[ "$tree" == true ]]; then
+      local root_dirs
+      root_dirs="$(echo "$keys" | cut -d/ -f1 | sort -u)"
+
+      for dir_name in $root_dirs; do
+        echo "$dir_name"
+        echo "$keys" \
+          | grep "^${dir_name}/" \
+          | cut -d/ -f2- \
+          | sed '$ s/^/└─ /; $ ! s/^/├─ /'
+      done
+    else
+      echo "$keys"
+    fi
+  fi
+}
+
+command_cleanup() {
+  local dry_run=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        dry_run=true
+        shift
+        ;;
+      *)
+        error "Unknown option: $1"
+        exit 1
+        ;;
+    esac
+  done
+
+  require_config
+
+  local retention_days="${RETENTION_DAYS:-0}"
+  if [[ "$retention_days" == "0" || -z "$retention_days" ]]; then
+    info "Retention is disabled (RETENTION_DAYS=0). Nothing to clean up."
+    return 0
+  fi
+  local retention_seconds=$((retention_days * 86400))
+
+  local now="${_NOW:-$(date +%s)}"
+  local cutoff=$((now - retention_seconds))
+
+  info "Cleaning up backups older than ${retention_days} day(s)..."
+
+  # --- Clean up old local temp files in working_dir ---
+  local tmp_deleted=0
+
+  if [[ -d "$working_dir" ]]; then
+    for item in "$working_dir"/*; do
+      [[ -e "$item" ]] || continue
+      # Skip the runs directory itself (only its contents are cleaned below)
+      [[ "$item" == "$run_log_dir" ]] && continue
+
+      local item_mtime
+      item_mtime="$(stat -c '%Y' "$item" 2> /dev/null)" || continue
+      if ((item_mtime < cutoff)); then
+        if $dry_run; then
+          info "Would delete temp: $item"
+        else
+          info "Deleting old temp: $item"
+          rm -rf "$item"
+        fi
+        tmp_deleted=$((tmp_deleted + 1))
+      fi
+    done
+
+    # Clean old files inside runs/ (keep the directory itself)
+    if [[ -d "$run_log_dir" ]]; then
+      for item in "$run_log_dir"/*; do
+        [[ -e "$item" ]] || continue
+
+        local item_mtime
+        item_mtime="$(stat -c '%Y' "$item" 2> /dev/null)" || continue
+        if ((item_mtime < cutoff)); then
+          if $dry_run; then
+            info "Would delete run log: $item"
+          else
+            info "Deleting old run log: $item"
+            rm -f "$item"
+          fi
+          tmp_deleted=$((tmp_deleted + 1))
+        fi
+      done
+    fi
+  fi
+
+  if ((tmp_deleted > 0)); then
+    if $dry_run; then
+      info "Would delete $tmp_deleted old temp file(s)."
+    else
+      info "Deleted $tmp_deleted old temp file(s)."
+    fi
+  fi
+
+  # --- Clean up old remote S3 backups ---
+  local ts_list
+  ts_list="$(command_ls --timestamps 2> /dev/null)"
+
+  if [[ -z "$ts_list" ]]; then
+    info "No remote backups found."
+  else
+    local s3_deleted=0
+
+    while IFS=$'\t' read -r epoch key; do
+      [[ -z "$epoch" || -z "$key" ]] && continue
+
+      if ((epoch < cutoff)); then
+        if $dry_run; then
+          info "Would delete: $key"
+        else
+          info "Deleting old backup: $key"
+          s3_cmd del "s3://${S3_BUCKET}/${key}" 2> >(_tee_to_log "s3 del")
+        fi
+        s3_deleted=$((s3_deleted + 1))
+      fi
+    done <<< "$ts_list"
+
+    if ((s3_deleted > 0)); then
+      if $dry_run; then
+        info "Would delete $s3_deleted old remote backup(s)."
+      else
+        info "Deleted $s3_deleted old remote backup(s)."
+      fi
+    else
+      info "No old remote backups to delete."
+    fi
+  fi
+}
+
+_create_error_handler() {
+  local exit_code=$?
+  if [[ $exit_code -ne 0 ]]; then
+    local deployment_name="${1:-unknown}"
+    local line_nr="${2:-unknown}"
+
+    local body="Backup for deployment '${deployment_name}' failed with exit code ${exit_code} (near line ${line_nr})."
+
+    # Append run log content if available
+    if [[ -n "${RUN_LOG_FILE:-}" && -f "$RUN_LOG_FILE" ]]; then
+      body+="
+
+--- Run log ---
+$(cat "$RUN_LOG_FILE")"
+    else
+      body+="
+
+Check the backup host for details."
+    fi
+
+    send_error_email \
+      "[parbackup] Backup FAILED for '${deployment_name}'" \
+      "$body"
+  fi
+  # Reset trap to avoid re-triggering
+  trap - EXIT
+}
+
+command_create() {
+  ensure_working_dir
+
+  local local_only=false
+  local backupfile=""
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --local)
+        local_only=true
+        shift
+        ;;
+      -f | --file)
+        backupfile="$2"
+        shift 2
+        ;;
+      *)
+        fail_help "Unknown option '$1' for create command"
+        ;;
+    esac
+  done
+
+  # Require S3 config unless --local
+  if [[ "$local_only" != true ]]; then
+    require_config
+  else
+    # In local mode, still try to load config for alert settings (non-fatal)
+    load_config || true
+  fi
+
+  # Set up error notification: on non-zero exit, send an email alert
+  trap '_create_error_handler "${BACKUP_NAME:-unknown}" "$LINENO"' EXIT
+
+  # Start the run log early so require_parbackupfile errors are captured.
+  mkdir -p "$run_log_dir"
+  RUN_LOG_FILE="$(mktemp "${run_log_dir}/run-XXXXXXXXXX.log")"
+  _log_to_file "INFO" "Command: $script_invocation"
+  _log_to_file "INFO" "Working directory: $(pwd)"
+
+  if [[ -n "$backupfile" ]]; then
+    require_parbackupfile "$backupfile"
+  else
+    require_parbackupfile
+    backupfile="./$parbackupfile_name"
+  fi
+
+  local timestamp
+  timestamp="$(date +%Y-%m-%d_%H-%M-%S)"
+  info "Run log: $RUN_LOG_FILE"
+
+  local backup_name="${BACKUP_NAME}-${timestamp}"
+  local backup_dir="${working_dir}/${backup_name}"
+
+  info "Creating backup: $backup_dir"
+  mkdir -p "$backup_dir"
+
+  # Enable logging to file inside the backup directory
+  BACKUP_LOG_FILE="${backup_dir}/parbackup.log"
+  info "Logging to $BACKUP_LOG_FILE"
+
+  # Save the Parbackupfile into the backup directory (always stored as "Parbackupfile")
+  cp "$backupfile" "$backup_dir/Parbackupfile"
+  info "Saved $backupfile to backup directory"
+
+  # Iterate over services
+  IFS=',' read -ra svc_list <<< "$SERVICES"
+
+  for svc_name in "${svc_list[@]}"; do
+    # Trim whitespace
+    svc_name="$(echo "$svc_name" | xargs)"
+
+    local svc_type
+    svc_type="$(require_svc_var "$svc_name" "TYPE")"
+
+    info "Processing service '$svc_name' (type: $svc_type)..."
+
+    local svc_target_dir="${backup_dir}/${svc_name}"
+    mkdir -p "$svc_target_dir"
+
+    case "$svc_type" in
+      postgres)
+        backup_postgres "$svc_name" "$svc_target_dir"
+        ;;
+      mongo)
+        backup_mongo "$svc_name" "$svc_target_dir"
+        ;;
+      volume)
+        backup_volume "$svc_name" "$svc_target_dir"
+        ;;
+      dir)
+        backup_dir "$svc_name" "$svc_target_dir"
+        ;;
+      *)
+        fail "Unknown service type '$svc_type' for service '$svc_name'"
+        ;;
+    esac
+  done
+
+  # Package as tar.gz
+  local archive="${working_dir}/${backup_name}.tar.gz"
+  info "Packaging backup: $archive"
+
+  # Disable backup log before packaging (log file is inside the backup dir)
+  BACKUP_LOG_FILE=""
+
+  tar -czf "$archive" -C "$working_dir" "$backup_name" 2> >(_tee_to_log "tar")
+
+  # Clean up uncompressed directory
+  rm -rf "$backup_dir"
+  info "Removed temporary directory $backup_dir"
+
+  # Upload to S3
+  if [[ "$local_only" != true ]]; then
+    local s3_key="${BACKUP_NAME}/${backup_name}.tar.gz"
+    info "Uploading to S3: s3://${S3_BUCKET}/${s3_key}"
+    s3_upload "$archive" "$s3_key"
+    info "S3 upload complete"
+
+    # Auto-cleanup old backups
+    command_cleanup
+  fi
+
+  # Clear error notification trap on success
+  trap - EXIT
+
+  info "Backup complete: $archive"
+
+  # Clean up the run log on success
+  rm -f "$RUN_LOG_FILE"
+  RUN_LOG_FILE=""
+}
+
+_sq() {
+  # Escape a value for safe use inside single quotes: replace ' with '\''
+  printf '%s' "${1//\'/\'\\\'\'}"
+}
+
+save_config() {
+  mkdir -p "$config_dir"
+  cat > "$config_file" << EOF
+# parbackup configuration
+S3_ENDPOINT='$(_sq "${S3_ENDPOINT:-}")'
+S3_BUCKET='$(_sq "${S3_BUCKET:-}")'
+S3_ACCESS_KEY='$(_sq "${S3_ACCESS_KEY:-}")'
+S3_SECRET_KEY='$(_sq "${S3_SECRET_KEY:-}")'
+RETENTION_DAYS='$(_sq "${RETENTION_DAYS:-7}")'
+ALERT_SMTP_HOST='$(_sq "${ALERT_SMTP_HOST:-}")'
+ALERT_SMTP_PORT='$(_sq "${ALERT_SMTP_PORT:-587}")'
+ALERT_SMTP_USER='$(_sq "${ALERT_SMTP_USER:-}")'
+ALERT_SMTP_PASSWORD='$(_sq "${ALERT_SMTP_PASSWORD:-}")'
+ALERT_SMTP_FROM='$(_sq "${ALERT_SMTP_FROM:-}")'
+ALERT_RECIPIENTS='$(_sq "${ALERT_RECIPIENTS:-}")'
+EOF
+  chmod 600 "$config_file"
+  info "Config saved to $config_file"
+}
+
+config_set_s3() {
+  info "Configuring S3 backend..."
+
+  S3_ENDPOINT="$(gum input --placeholder "https://fsn1.your-objectstorage.com" \
+    --header "S3 Endpoint URL" --value "${S3_ENDPOINT:-}")"
+  S3_BUCKET="$(gum input --placeholder "my-backups" \
+    --header "S3 Bucket Name" --value "${S3_BUCKET:-}")"
+  S3_ACCESS_KEY="$(gum input --placeholder "access key" \
+    --header "S3 Access Key" --value "${S3_ACCESS_KEY:-}")"
+  S3_SECRET_KEY="$(gum input --placeholder "secret key" --password \
+    --header "S3 Secret Key" --value "${S3_SECRET_KEY:-}")"
+  RETENTION_DAYS="$(gum input --placeholder "7" \
+    --header "Retention period in days (0 = disabled)" --value "${RETENTION_DAYS:-7}")"
+
+  save_config
+}
+
+config_set_alert() {
+  info "Configuring alert notifications..."
+
+  ALERT_SMTP_HOST="$(gum input --placeholder "smtp.example.com" \
+    --header "SMTP Host" --value "${ALERT_SMTP_HOST:-}")"
+  ALERT_SMTP_PORT="$(gum input --placeholder "587" \
+    --header "SMTP Port" --value "${ALERT_SMTP_PORT:-587}")"
+  ALERT_SMTP_USER="$(gum input --placeholder "user@example.com (leave empty for no auth)" \
+    --header "SMTP User" --value "${ALERT_SMTP_USER:-}")"
+  ALERT_SMTP_PASSWORD="$(gum input --placeholder "password" --password \
+    --header "SMTP Password" --value "${ALERT_SMTP_PASSWORD:-}")"
+  ALERT_SMTP_FROM="$(gum input --placeholder "backups@example.com" \
+    --header "From address" --value "${ALERT_SMTP_FROM:-}")"
+  ALERT_RECIPIENTS="$(gum input --placeholder "admin@example.com,ops@example.com" \
+    --header "Error recipients (comma-separated)" --value "${ALERT_RECIPIENTS:-}")"
+
+  save_config
+}
+
+command_config() {
+  local subcmd="${1:-}"
+  local section="${2:-}"
+
+  # Load existing config to preserve values when saving
+  load_config || true
+
+  case "$subcmd" in
+    set)
+      case "$section" in
+        s3 | "")
+          config_set_s3
+          ;;
+        alert)
+          config_set_alert
+          ;;
+        *)
+          fail_help "Unknown config section '$section'. Use 'config set', 'config set s3', or 'config set alert'."
+          ;;
+      esac
+      ;;
+
+    "")
+      if [[ ! -f "$config_file" ]]; then
+        warn "No config found at $config_file"
+        info "Run 'parbackup config set' to configure."
+        return 0
+      fi
+      echo "Config: $config_file"
+      echo ""
+      echo "S3_ENDPOINT      = ${S3_ENDPOINT:-<not set>}"
+      echo "S3_BUCKET        = ${S3_BUCKET:-<not set>}"
+      echo "S3_ACCESS_KEY    = $(mask_secret "${S3_ACCESS_KEY:-}")"
+      echo "S3_SECRET_KEY    = $(mask_secret "${S3_SECRET_KEY:-}")"
+      echo "RETENTION_DAYS   = ${RETENTION_DAYS:-<not set>}"
+      echo ""
+      echo "ALERT_SMTP_HOST     = ${ALERT_SMTP_HOST:-<not set>}"
+      echo "ALERT_SMTP_PORT     = ${ALERT_SMTP_PORT:-<not set>}"
+      echo "ALERT_SMTP_USER     = ${ALERT_SMTP_USER:-<not set>}"
+      echo "ALERT_SMTP_PASSWORD = $(mask_secret "${ALERT_SMTP_PASSWORD:-}")"
+      echo "ALERT_SMTP_FROM     = ${ALERT_SMTP_FROM:-<not set>}"
+      echo "ALERT_RECIPIENTS    = ${ALERT_RECIPIENTS:-<not set>}"
+      ;;
+
+    *)
+      fail_help "Unknown config subcommand '$subcmd'. Use 'config', 'config set', or 'config set alert'."
+      ;;
+  esac
+}
+
+command_cron() {
+  local subcmd=""
+  local backupfile=""
+  local schedule_arg=""
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f | --file)
+        backupfile="$2"
+        shift 2
+        ;;
+      --schedule)
+        schedule_arg="$2"
+        shift 2
+        ;;
+      *)
+        if [[ -z "$subcmd" ]]; then
+          subcmd="$1"
+        else
+          fail_help "Unknown option '$1' for cron command"
+        fi
+        shift
+        ;;
+    esac
+  done
+
+  local script_path
+  script_path="$(readlink -f "$0")"
+
+  case "${subcmd:-}" in
+    show)
+      info "Current parbackup cron entries:"
+      echo ""
+      local entries
+      entries="$(crontab -l 2> /dev/null | grep "# parbackup:" || true)"
+      if [[ -z "$entries" ]]; then
+        info "No parbackup cron entries found."
+      else
+        echo "$entries"
+      fi
+      ;;
+
+    remove)
+      if [[ -z "$backupfile" ]]; then
+        fail "Missing required option: -f <path>"
+      fi
+
+      if [[ ! -f "$backupfile" ]]; then
+        fail "Parbackupfile not found: $backupfile"
+      fi
+
+      # Load Parbackupfile to get BACKUP_NAME for the marker
+      require_parbackupfile "$backupfile"
+      local marker="# parbackup:${BACKUP_NAME}"
+
+      local current_crontab
+      current_crontab="$(crontab -l 2> /dev/null || true)"
+
+      if ! echo "$current_crontab" | grep -q "${marker}$"; then
+        info "No cron entry found for '$BACKUP_NAME'."
+        return 0
+      fi
+
+      local new_crontab
+      new_crontab="$(echo "$current_crontab" | grep -v "${marker}$" || true)"
+
+      if [[ -n "$new_crontab" ]]; then
+        echo "$new_crontab" | crontab -
+      else
+        crontab -r 2> /dev/null || true
+      fi
+      info "Removed cron entry for '$BACKUP_NAME'."
+      ;;
+
+    "")
+      # Default: add or update cron entry
+      if [[ -z "$backupfile" ]]; then
+        fail "Missing required option: -f <path>"
+      fi
+
+      if [[ ! -f "$backupfile" ]]; then
+        fail "Parbackupfile not found: $backupfile"
+      fi
+
+      local abs_backupfile
+      abs_backupfile="$(realpath "$backupfile")"
+
+      # Load Parbackupfile to get BACKUP_NAME for the marker
+      require_parbackupfile "$abs_backupfile"
+      local marker="# parbackup:${BACKUP_NAME}"
+
+      # Choose frequency
+      local schedule
+      if [[ -n "$schedule_arg" ]]; then
+        schedule="$schedule_arg"
+      else
+        local choice
+        choice="$(gum choose \
+          "Daily at 3:00 AM" \
+          "Daily at midnight" \
+          "Every 12 hours" \
+          "Custom")"
+
+        case "$choice" in
+          "Daily at 3:00 AM")   schedule="0 3 * * *" ;;
+          "Daily at midnight")  schedule="0 0 * * *" ;;
+          "Every 12 hours")     schedule="0 */12 * * *" ;;
+          "Custom")
+            schedule="$(gum input --placeholder "0 3 * * *" --header "Enter cron schedule (5 fields)")"
+            if [[ -z "$schedule" ]]; then
+              fail "No schedule provided."
+            fi
+            ;;
+        esac
+      fi
+
+      local cron_line="${schedule} ${script_path} create -f ${abs_backupfile} ${marker}"
+
+      local current_crontab
+      current_crontab="$(crontab -l 2> /dev/null || true)"
+
+      local new_crontab
+      if echo "$current_crontab" | grep -q "${marker}$"; then
+        # Update existing entry
+        new_crontab="$(echo "$current_crontab" | grep -v "${marker}$" || true)"
+        if [[ -n "$new_crontab" ]]; then
+          new_crontab="${new_crontab}
+${cron_line}"
+        else
+          new_crontab="$cron_line"
+        fi
+        info "Updating existing cron entry for '$BACKUP_NAME'."
+      else
+        # Append new entry
+        if [[ -n "$current_crontab" ]]; then
+          new_crontab="${current_crontab}
+${cron_line}"
+        else
+          new_crontab="$cron_line"
+        fi
+        info "Adding cron entry for '$BACKUP_NAME'."
+      fi
+
+      echo "$new_crontab" | crontab -
+      info "Cron entry set: $cron_line"
+      ;;
+
+    *)
+      fail_help "Unknown cron subcommand '$subcmd'. Use 'cron', 'cron show', or 'cron remove'."
+      ;;
+  esac
+}
+
+command_download() {
+  ensure_working_dir
+
+  local force=false
+  local pick=false
+  local backup_ref=""
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f | --force)
+        force=true
+        shift
+        ;;
+      --pick)
+        pick=true
+        shift
+        ;;
+      *)
+        backup_ref="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "$pick" == true ]]; then
+    if [[ -n "$backup_ref" ]]; then
+      fail "--pick does not accept a backup reference argument"
+    fi
+
+    require_config
+
+    local keys
+    keys="$(command_ls 2> /dev/null)"
+
+    if [[ -z "$keys" ]]; then
+      fail "No backups found on S3."
+    fi
+
+    backup_ref="$(echo "$keys" | gum filter)"
+
+    if [[ -z "$backup_ref" ]]; then
+      info "No backup selected."
+      exit 0
+    fi
+  fi
+
+  if [[ -z "$backup_ref" ]]; then
+    fail_help "Missing required argument: <backup_ref>"
+  fi
+
+  require_config
+
+  local local_archive="${working_dir}/$(basename "$backup_ref")"
+
+  if [[ -f "$local_archive" ]]; then
+    warn "File already exists: $local_archive"
+    if [[ "$force" == true ]] || gum confirm --default=No "Overwrite?"; then
+      rm -f "$local_archive"
+    else
+      info "Download cancelled."
+      exit 0
+    fi
+  fi
+
+  info "Downloading from S3: s3://${S3_BUCKET}/${backup_ref}"
+  s3_download "$backup_ref" "$local_archive" >&2
+  info "Downloaded to $local_archive"
+
+  # Print the local path to stdout so callers can capture it.
+  # All other output (gum, s3cmd) goes to stderr.
+  echo "$local_archive"
+}
+
+command_restore() {
+  ensure_working_dir
+
+  local force=false
+  local local_only=false
+  local pick=false
+  local backup_ref=""
+  local extracted_tmp=""
+
+  # Parse options
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f | --force)
+        force=true
+        shift
+        ;;
+      --local)
+        local_only=true
+        shift
+        ;;
+      --pick)
+        pick=true
+        shift
+        ;;
+      *)
+        backup_ref="$1"
+        shift
+        ;;
+    esac
+  done
+
+  if [[ "$pick" == true ]]; then
+    if [[ "$local_only" == true ]]; then
+      fail "--pick and --local cannot be used together"
+    fi
+    if [[ -n "$backup_ref" ]]; then
+      fail "--pick does not accept a backup reference argument"
+    fi
+  fi
+
+  local backup_dir=""
+
+  if [[ "$local_only" == true ]]; then
+    # Local mode: backup_ref is a local .tar.gz or directory
+    if [[ -z "$backup_ref" ]]; then
+      fail_help "Missing required argument: <backup_ref>"
+    fi
+
+    if [[ "$backup_ref" == *.tar.gz ]]; then
+      if [[ ! -f "$backup_ref" ]]; then
+        fail "Backup archive not found: $backup_ref"
+      fi
+      extracted_tmp="$(mktemp -d "${working_dir}/restore-XXXXXX")"
+      info "Extracting $backup_ref..."
+      tar -xzf "$backup_ref" -C "$extracted_tmp"
+      backup_dir="$(find "$extracted_tmp" -mindepth 1 -maxdepth 1 -type d | head -1)"
+      if [[ -z "$backup_dir" ]]; then
+        rm -rf "$extracted_tmp"
+        fail "Archive does not contain a backup directory"
+      fi
+    elif [[ -d "$backup_ref" ]]; then
+      backup_dir="$backup_ref"
+    else
+      fail "Backup path not found: $backup_ref (expected a directory or .tar.gz file)"
+    fi
+  else
+    # S3 mode: delegate download to command_download
+    local download_args=()
+    if [[ "$force" == true ]]; then
+      download_args+=("--force")
+    fi
+    if [[ "$pick" == true ]]; then
+      download_args+=("--pick")
+    fi
+    if [[ -n "$backup_ref" ]]; then
+      download_args+=("$backup_ref")
+    fi
+
+    local local_archive
+    local_archive="$(command_download "${download_args[@]}")"
+
+    extracted_tmp="$(mktemp -d "${working_dir}/restore-XXXXXX")"
+    info "Extracting $local_archive..."
+    tar -xzf "$local_archive" -C "$extracted_tmp"
+    backup_dir="$(find "$extracted_tmp" -mindepth 1 -maxdepth 1 -type d | head -1)"
+    if [[ -z "$backup_dir" ]]; then
+      rm -rf "$extracted_tmp"
+      fail "Archive does not contain a backup directory"
+    fi
+
+    # Clean up downloaded archive
+    rm -f "$local_archive"
+  fi
+
+  require_parbackupfile "${backup_dir}/Parbackupfile"
+
+  if [[ "$force" != true ]]; then
+    warn "You are about to restore deployment '$BACKUP_NAME' from: $backup_dir"
+    warn "This will DROP and recreate all databases listed in the backup."
+
+    if ! gum confirm --default=No "Proceed with restore?"; then
+      info "Restore cancelled."
+      exit 0
+    fi
+  fi
+
+  info "Restoring backup: $backup_dir (deployment: $BACKUP_NAME)"
+
+  # Iterate over services
+  IFS=',' read -ra svc_list <<< "$SERVICES"
+
+  for svc_name in "${svc_list[@]}"; do
+    # Trim whitespace
+    svc_name="$(echo "$svc_name" | xargs)"
+
+    local svc_type
+    svc_type="$(require_svc_var "$svc_name" "TYPE")"
+
+    info "Restoring service '$svc_name' (type: $svc_type)..."
+
+    local svc_source_dir="${backup_dir}/${svc_name}"
+
+    if [[ ! -d "$svc_source_dir" ]]; then
+      fail "Service directory not found in backup: $svc_source_dir"
+    fi
+
+    case "$svc_type" in
+      postgres)
+        restore_postgres "$svc_name" "$svc_source_dir"
+        ;;
+      mongo)
+        restore_mongo "$svc_name" "$svc_source_dir"
+        ;;
+      volume)
+        restore_volume "$svc_name" "$svc_source_dir"
+        ;;
+      dir)
+        restore_dir "$svc_name" "$svc_source_dir"
+        ;;
+      *)
+        fail "Unknown service type '$svc_type' for service '$svc_name'"
+        ;;
+    esac
+  done
+
+  # Clean up extracted temp dir if we extracted a tar.gz
+  if [[ -n "$extracted_tmp" ]]; then
+    rm -rf "$extracted_tmp"
+  fi
+
+  info "Restore complete from: $backup_ref"
+}
+
+# ---
+
+# Make sure `gum` is installed.
+if ! command -v gum > /dev/null; then
+  echo "WARN: Required command 'gum' not available... Installing it."
+  install_gum
+fi
+
+# Parse sub-command
+subcommand="${1:-}"
+
+# Check if first argument is a help flag
+if [[ "$subcommand" == "-h" || "$subcommand" == "--help" || "$subcommand" == "" ]]; then
+  print_banner
+  print_help
+  exit 0
+fi
+
+# Skip the subcommand argument
+shift
+
+print_banner
+
+# Handle sub-commands
+case "$subcommand" in
+  updateself) command_updateself "$@" ;;
+  create) command_create "$@" ;;
+  download) command_download "$@" ;;
+  ls) command_ls "$@" ;;
+  cleanup) command_cleanup "$@" ;;
+  cron) command_cron "$@" ;;
+  restore) command_restore "$@" ;;
+  config) command_config "$@" ;;
+
+  help)
+    print_help
+    exit 0
+    ;;
+
+  *) fail_help "Unknown command '$subcommand'" ;;
+esac

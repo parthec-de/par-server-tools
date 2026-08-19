@@ -1,0 +1,10 @@
+# Parbackupfile - Test: Postgres with default "postgres" database name
+BACKUP_NAME="test_defaultdb"
+
+SERVICES="pg_default"
+
+PG_DEFAULT_TYPE="postgres"
+PG_DEFAULT_CONTAINER="parbackup-test-postgres-defaultdb"
+PG_DEFAULT_USER="testuser"
+PG_DEFAULT_PASSWORD="testpass"
+PG_DEFAULT_DB="postgres"

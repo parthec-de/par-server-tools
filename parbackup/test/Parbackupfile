@@ -1,0 +1,30 @@
+# Parbackupfile - Test Deployment
+# This file is sourced by the parbackup script.
+
+BACKUP_NAME="test_deployment"
+
+# Comma-separated list of service names
+SERVICES="app_db,app_mongo,app_uploads,app_static"
+
+# --- app_db (Postgres) ---
+APP_DB_TYPE="postgres"
+APP_DB_CONTAINER="parbackup-test-postgres"
+APP_DB_USER="testuser"
+APP_DB_PASSWORD="testpass"
+APP_DB_DB="testdb"
+
+# --- app_mongo (MongoDB) ---
+APP_MONGO_TYPE="mongo"
+APP_MONGO_CONTAINER="parbackup-test-mongo"
+APP_MONGO_USER="testuser"
+APP_MONGO_PASSWORD="testpass"
+APP_MONGO_DB="testdb"
+
+# --- app_uploads (Docker volume) ---
+APP_UPLOADS_TYPE="volume"
+APP_UPLOADS_CONTAINER="parbackup-test-uploads"
+APP_UPLOADS_PATH="/app/public/uploads"
+
+# --- app_static (local directory) ---
+APP_STATIC_TYPE="dir"
+APP_STATIC_PATH="/tmp/parbackup-test-localdir"

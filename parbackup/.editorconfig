@@ -1,0 +1,21 @@
+[*.bats]
+indent_style = space
+indent_size = 2
+shell_variant = bats
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+function_next_line = false
+keep_padding = true
+never_split = true
+
+[{parbackup,*.sh}]
+indent_style = space
+indent_size = 2
+shell_variant = bash
+binary_next_line = true
+switch_case_indent = true
+space_redirects = true
+function_next_line = false
+keep_padding = true
+never_split = true

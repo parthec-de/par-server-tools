@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: postgres:18.1-alpine3.23
+    container_name: parbackup-test-postgres
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+      POSTGRES_DB: testdb
+    ports:
+      - "25432:5432"
+    volumes:
+      - ./init-postgres:/docker-entrypoint-initdb.d
+      - pgdata:/var/lib/postgresql/data
+
+  # Second Postgres instance using the default "postgres" database name.
+  # Tests that restore works when the DB name is "postgres" (the currently open DB).
+  postgres_default_db:
+    image: postgres:18.1-alpine3.23
+    container_name: parbackup-test-postgres-defaultdb
+    environment:
+      POSTGRES_USER: testuser
+      POSTGRES_PASSWORD: testpass
+    ports:
+      - "25433:5432"
+    volumes:
+      - ./init-postgres:/docker-entrypoint-initdb.d
+      - pgdata_defaultdb:/var/lib/postgresql/data
+
+  mongo:
+    image: mongo:6.0.4
+    container_name: parbackup-test-mongo
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: testuser
+      MONGO_INITDB_ROOT_PASSWORD: testpass
+      MONGO_INITDB_DATABASE: testdb
+    ports:
+      - "27117:27017"
+    volumes:
+      - ./init-mongo:/docker-entrypoint-initdb.d
+      - mongodata:/data/db
+
+  minio:
+    image: minio/minio:latest
+    container_name: parbackup-test-minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "29000:9000"
+    command: server /data
+    volumes:
+      - miniodata:/data
+
+  # Simple container with a volume for testing the 'volume' service type.
+  # Simulates e.g. Strapi uploads or any file-based data.
+  uploads:
+    image: alpine:3.21
+    container_name: parbackup-test-uploads
+    command: tail -f /dev/null
+    volumes:
+      - uploads:/app/public/uploads
+
+  # Lightweight SMTP server for testing error notification emails.
+  # Requires SMTP authentication (verifies credentials are passed correctly).
+  # API available at http://localhost:28025/api/v1/messages
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: parbackup-test-mailpit
+    ports:
+      - "21025:1025"   # SMTP
+      - "28025:8025"   # HTTP API
+    volumes:
+      - ./mailpit-auth.txt:/etc/mailpit-auth.txt:ro
+    command: >
+      --smtp-auth-file /etc/mailpit-auth.txt
+      --smtp-auth-allow-insecure
+
+  # Lightweight container with crontab + bash for testing cron subcommands.
+  cron:
+    image: alpine:3.21
+    container_name: parbackup-test-cron
+    command: sh -c "apk add --no-cache bash gum > /dev/null 2>&1 && tail -f /dev/null"
+    volumes:
+      - ../parbackup:/usr/local/bin/parbackup:ro
+      - ./Parbackupfile:/test/Parbackupfile:ro
+      - ./Parbackupfile.prefix:/test/Parbackupfile.prefix:ro
+
+volumes:
+  pgdata:
+  pgdata_defaultdb:
+  mongodata:
+  miniodata:
+  uploads:
