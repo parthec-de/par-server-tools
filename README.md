@@ -15,7 +15,7 @@ private, so `git clone` prompts for your Codeberg credentials interactively.
 Run as root so it can write to `/usr/local`:
 
 ```bash
-sh -c 'test -d /usr/local/share/par-server-tools || git clone https://codeberg.org/parthec/par-server-tools.git /usr/local/share/par-server-tools; /usr/local/share/par-server-tools/install.sh'
+sh -c 'git clone https://codeberg.org/parthec/par-server-tools.git /usr/local/share/par-server-tools && /usr/local/share/par-server-tools/install.sh'
 ```
 
 Override the install prefix with `PAR_PREFIX` (default `/usr/local`).
