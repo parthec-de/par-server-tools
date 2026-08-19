@@ -1,0 +1,4 @@
+[tasks."test:parbackup"]
+description = "Run parbackup bats integration tests"
+dir = "parbackup"
+run = "bats test/test.bats"
