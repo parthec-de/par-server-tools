@@ -278,4 +278,10 @@ main() {
   esac
 }
 
+# Make sure `gum` is installed.
+if ! command -v gum > /dev/null; then
+  echo "WARN: Required command 'gum' not available... Installing it."
+  install_gum
+fi
+
 main "$@"
