@@ -9,32 +9,18 @@ Collection of server tools for deployments. One directory per tool.
 
 ## Installation
 
-The installer clones the repository into `/usr/local/share/par-server-tools` and
-symlinks each tool into `/usr/local/bin`. The repository is private, so
-authentication is required — the one-liner prompts for a
-[Codeberg access token](https://codeberg.org/user/settings/applications)
-(input is hidden):
+Clone the repository into `/usr/local/share/par-server-tools` and run the
+installer, which symlinks each tool into `/usr/local/bin`. The repository is
+private, so `git clone` prompts for your Codeberg credentials interactively.
+Run as root so it can write to `/usr/local`:
 
 ```bash
-read -rsp "Codeberg token: " CODEBERG_TOKEN && echo && export CODEBERG_TOKEN
-bash -c "$(curl -fsSL -H "Authorization: token $CODEBERG_TOKEN" \
-  https://codeberg.org/parthec/par-server-tools/raw/branch/main/install.sh)"
+sh -c 'test -d /usr/local/share/par-server-tools || git clone https://codeberg.org/parthec/par-server-tools.git /usr/local/share/par-server-tools; /usr/local/share/par-server-tools/install.sh'
 ```
 
-The token is used both to fetch the installer and (via `CODEBERG_TOKEN`) to clone
-the repository. For non-interactive use (CI), set `CODEBERG_TOKEN` beforehand and
-skip the first line. Overrides: `PAR_PREFIX` (install prefix, default `/usr/local`),
-`PAR_REF` (branch/tag).
+Override the install prefix with `PAR_PREFIX` (default `/usr/local`).
 
-Update an existing install by pulling the checkout (or just re-run the installer):
+## Update
 
-```bash
-git -C /usr/local/share/par-server-tools pull
-```
-
-Alternatively, clone the repo and run the installer directly:
-
-```bash
-git clone https://codeberg.org/parthec/par-server-tools.git
-cd par-server-tools && ./install.sh
-```
+Re-run the command above. It is idempotent: if the repository already exists the
+installer pulls the latest changes, and existing symlinks are left untouched.
