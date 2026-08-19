@@ -28,7 +28,7 @@ parbackup config
 
 ### Parbackupfile
 
-Place an `Parbackupfile` in your deployment directory:
+Place a `Parbackupfile` in your deployment directory:
 
 ```bash
 BACKUP_NAME="my_project"
@@ -125,14 +125,14 @@ parbackup cron remove -f /path/to/Parbackupfile
 parbackup updateself
 ```
 
-Backups are written to `/tmp/parbackup-<BACKUP_NAME>-<timestamp>.tar.gz`. The archive contains one subdirectory per service, the `Parbackupfile`, and an `parbackup.log` with timestamped log output from the backup run. On S3, backups are stored under `<BACKUP_NAME>/` prefix.
+Backups are written to `/tmp/parbackup-<BACKUP_NAME>-<timestamp>.tar.gz`. The archive contains one subdirectory per service, the `Parbackupfile`, and a `parbackup.log` with timestamped log output from the backup run. On S3, backups are stored under `<BACKUP_NAME>/` prefix.
 
 ### Logging
 
 Each `parbackup create` run produces two log files:
 
 - **Backup log** (`parbackup.log`) — included inside the `.tar.gz` archive. Contains timestamped entries for each backup step up to packaging. Useful for auditing what happened during a specific backup.
-- **Run log** (`/tmp/parbackup-runs/run-XXXXXXXXXX.log`) — an ephemeral log that captures the entire run including S3 upload and post-packaging steps. The first two entries are always the full command invocation and the current working directory. Automatically deleted on success; kept on failure for debugging. If alert SMTP is configured, the run log content is included in the error notification email.
+- **Run log** (`/tmp/parbackup-runs/run-XXXXXXXXXX.log`) — an ephemeral log that captures the entire run including S3 upload and post-packaging steps. The first two entries are always the full command invocation and the current working directory. Automatically deleted on success; kept on failure for debugging. If [paralert](../paralert/) is configured, the run log content is included in the error notification email (see [Error notifications](#error-notifications)).
 
 ### Download
 

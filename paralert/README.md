@@ -9,7 +9,7 @@ host `PATH`.
 
 - Bash
 - curl
-- [gum](https://github.com/charmbracelet/gum) (only for `config set`)
+- [gum](https://github.com/charmbracelet/gum) (used for `config` and styled log output)
 
 ## Setup
 
