@@ -59,11 +59,11 @@ APP_STATIC_PATH="/opt/my-project/static"
 | ----------------- | ------------------------------------------------------- |
 | `BACKUP_NAME`     | Name of this deployment (used in backup directory name) |
 | `SERVICES`        | Comma-separated list of service names                   |
-| `<SVC>_TYPE`      | Service type: `postgres`, `mongo`, `volume`, or `dir`   |
-| `<SVC>_CONTAINER` | Docker container name (`postgres`, `mongo`, `volume`)   |
-| `<SVC>_USER`      | Database user (`postgres`, `mongo`)                     |
-| `<SVC>_PASSWORD`  | Database password (`postgres`, `mongo`)                 |
-| `<SVC>_DB`        | Database name (`postgres`, `mongo`)                     |
+| `<SVC>_TYPE`      | Service type: `postgres`, `mongo`, `mysql`, `volume`, or `dir` |
+| `<SVC>_CONTAINER` | Docker container name (`postgres`, `mongo`, `mysql`, `volume`) |
+| `<SVC>_USER`      | Database user (`postgres`, `mongo`, `mysql`)           |
+| `<SVC>_PASSWORD`  | Database password (`postgres`, `mongo`, `mysql`)       |
+| `<SVC>_DB`        | Database name (`postgres`, `mongo`, `mysql`)           |
 | `<SVC>_PATH`      | Path to back up (`volume`, `dir`)                       |
 
 `<SVC>` is the uppercase version of the service name defined in `SERVICES`.
@@ -72,6 +72,7 @@ APP_STATIC_PATH="/opt/my-project/static"
 
 - **`postgres`** — Online `pg_dump`/`pg_restore` of a Postgres database running in a Docker container.
 - **`mongo`** — Online `mongodump`/`mongorestore` of a MongoDB database running in a Docker container.
+- **`mysql`** — Online `mysqldump --single-transaction`/`mysql` restore of a MySQL database running in a Docker container. Restore drops and recreates the target database first.
 - **`volume`** — Copies files from a Docker container path via `docker cp`. Useful for named volumes (e.g. upload directories). Restore clears the target path first.
 - **`dir`** — Copies a local directory via `cp -a`. Restore uses `rsync --delete` for a clean sync. Useful for bind-mounted host directories or any local path.
 

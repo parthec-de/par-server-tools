@@ -371,6 +371,32 @@ backup_mongo() {
   info "  MongoDB dump saved to $dump_file"
 }
 
+backup_mysql() {
+  local svc_name="$1"
+  local target_dir="$2"
+
+  local container db_user db_password db_name
+
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  db_user="$(require_svc_var "$svc_name" "USER")"
+  db_password="$(require_svc_var "$svc_name" "PASSWORD")"
+  db_name="$(require_svc_var "$svc_name" "DB")"
+
+  local dump_file="${target_dir}/dump.sql"
+
+  info "  Dumping MySQL database '$db_name' from container '$container'..."
+
+  # --single-transaction: consistent online dump of InnoDB tables without locking.
+  # --no-tablespaces: avoids requiring the PROCESS privilege.
+  # MYSQL_PWD keeps the password off the command line (like PGPASSWORD for Postgres).
+  docker exec -e MYSQL_PWD="$db_password" "$container" \
+    mysqldump --single-transaction --no-tablespaces -u "$db_user" "$db_name" > "$dump_file" \
+    2> >(_tee_to_log "mysqldump") \
+    || fail "mysqldump failed in container '$container' (is mysqldump installed?)"
+
+  info "  MySQL dump saved to $dump_file"
+}
+
 restore_postgres() {
   local svc_name="$1"
   local source_dir="$2"
@@ -442,6 +468,39 @@ restore_mongo() {
     || fail "mongorestore failed for database '$db_name' in container '$container'"
 
   info "  MongoDB restore complete for '$db_name'"
+}
+
+restore_mysql() {
+  local svc_name="$1"
+  local source_dir="$2"
+
+  local container db_user db_password db_name
+
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  db_user="$(require_svc_var "$svc_name" "USER")"
+  db_password="$(require_svc_var "$svc_name" "PASSWORD")"
+  db_name="$(require_svc_var "$svc_name" "DB")"
+
+  local dump_file="${source_dir}/dump.sql"
+
+  if [[ ! -f "$dump_file" ]]; then
+    fail "MySQL dump file not found: $dump_file"
+  fi
+
+  info "  Restoring MySQL database '$db_name' in container '$container'..."
+
+  # Drop and recreate the database to ensure a clean restore.
+  # Backticks quote the identifier; they are escaped so bash does not run them.
+  docker exec -e MYSQL_PWD="$db_password" "$container" \
+    mysql -u "$db_user" \
+      -e "DROP DATABASE IF EXISTS \`$db_name\`; CREATE DATABASE \`$db_name\`;" \
+    || fail "Failed to drop/recreate database '$db_name' in container '$container'"
+
+  docker exec -i -e MYSQL_PWD="$db_password" "$container" \
+    mysql -u "$db_user" "$db_name" < "$dump_file" \
+    || fail "mysql restore failed for database '$db_name' in container '$container'"
+
+  info "  MySQL restore complete for '$db_name'"
 }
 
 backup_volume() {
@@ -818,6 +877,9 @@ command_create() {
         ;;
       mongo)
         backup_mongo "$svc_name" "$svc_target_dir"
+        ;;
+      mysql)
+        backup_mysql "$svc_name" "$svc_target_dir"
         ;;
       volume)
         backup_volume "$svc_name" "$svc_target_dir"
@@ -1301,6 +1363,9 @@ command_restore() {
         ;;
       mongo)
         restore_mongo "$svc_name" "$svc_source_dir"
+        ;;
+      mysql)
+        restore_mysql "$svc_name" "$svc_source_dir"
         ;;
       volume)
         restore_volume "$svc_name" "$svc_source_dir"

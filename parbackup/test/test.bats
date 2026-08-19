@@ -43,14 +43,23 @@ mongo_query() {
       --quiet --eval "$1"
 }
 
+mysql_query() {
+  docker exec -e MYSQL_PWD=testpass parbackup-test-mysql \
+    mysql -u testuser -D testdb -N -B -e "$1"
+}
+
 wait_for_dbs() {
-  for i in $(seq 1 30); do
+  # 60 attempts: MySQL 8 cold-starts (data dir init + seed) can take a while.
+  for i in $(seq 1 60); do
     if docker exec parbackup-test-postgres pg_isready -q 2> /dev/null \
       && docker exec parbackup-test-postgres-defaultdb pg_isready -q 2> /dev/null \
       && docker exec parbackup-test-mongo mongosh -u testuser -p testpass \
            --authenticationDatabase admin --quiet \
            --eval "db.getSiblingDB('testdb').products.countDocuments()" 2> /dev/null \
-         | grep -q "3"; then
+         | grep -q "3" \
+      && docker exec -e MYSQL_PWD=testpass parbackup-test-mysql \
+           mysql -u testuser -D testdb -N -B -e "SELECT count(*) FROM users;" 2> /dev/null \
+         | grep -q "^3$"; then
       return 0
     fi
     sleep 1
@@ -215,6 +224,7 @@ teardown_file() {
   docker compose -f "$COMPOSE_FILE" down -v --remove-orphans 2> /dev/null || true
   rm -rf /tmp/parbackup/test_deployment-* 2> /dev/null || true
   rm -rf /tmp/parbackup/test_defaultdb-* 2> /dev/null || true
+  rm -rf /tmp/parbackup/test_mysql-* 2> /dev/null || true
   rm -rf /tmp/parbackup/restore-* 2> /dev/null || true
   rm -rf /tmp/parbackup-test-localdir 2> /dev/null || true
   rm -rf "${TEST_CONFIG_DIR:-}" 2> /dev/null || true
@@ -450,6 +460,72 @@ teardown_file() {
   [[ "$restored" != *"TAMPERED"* ]]
   restored_count="$(pg_defaultdb_query "SELECT count(*) FROM items;")"
   [ "$restored_count" -eq 2 ]
+}
+
+#
+# Test: MySQL backup/restore
+#
+
+@test "mysql seed: Alice, Bob, Charlie exist" {
+  local result
+  result="$(mysql_query "SELECT name FROM users ORDER BY id;")"
+  [[ "$result" == *"Alice Mueller"* ]]
+  [[ "$result" == *"Bob Schmidt"* ]]
+  [[ "$result" == *"Charlie Weber"* ]]
+}
+
+@test "backup: mysql dump in archive contains seed data" {
+  local backup_output archive
+  backup_output="$(cd "$TEST_DIR" && env HOME="$ISOLATED_HOME" PARBACKUPFILE=Parbackupfile.mysql "$PARBACKUP" create --local 2>&1)"
+  archive="$(echo "$backup_output" | grep "Backup complete:" | sed 's/.*Backup complete: //')"
+  [ -f "$archive" ]
+
+  local tmpdir dump_file
+  tmpdir="$(mktemp -d)"
+  tar -xzf "$archive" -C "$tmpdir"
+  dump_file="$(find "$tmpdir" -path '*app_mysql/dump.sql')"
+  [ -n "$dump_file" ]
+  grep -q "Alice Mueller" "$dump_file"
+  grep -q "Bob Schmidt" "$dump_file"
+
+  rm -rf "$tmpdir" "$archive"
+  rm -rf /tmp/parbackup/test_mysql-* 2> /dev/null || true
+}
+
+@test "restore: mysql round-trip preserves data" {
+  local count
+  count="$(mysql_query "SELECT count(*) FROM users;")"
+  [ "$count" -eq 3 ]
+
+  # Create backup using the mysql Parbackupfile
+  local backup_output archive
+  backup_output="$(cd "$TEST_DIR" && env HOME="$ISOLATED_HOME" PARBACKUPFILE=Parbackupfile.mysql "$PARBACKUP" create --local 2>&1)"
+  archive="$(echo "$backup_output" | grep "Backup complete:" | sed 's/.*Backup complete: //')"
+  [ -f "$archive" ]
+
+  # Tamper with the data
+  mysql_query "DELETE FROM users; INSERT INTO users (name, email) VALUES ('INTRUDER', 'hacked@evil.com');"
+  local result
+  result="$(mysql_query "SELECT name FROM users;")"
+  [[ "$result" == *"INTRUDER"* ]]
+
+  # Restore
+  run env HOME="$ISOLATED_HOME" "$PARBACKUP" restore --local --force "$archive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Restore complete"* ]]
+
+  # Verify original data is back
+  local restored restored_count
+  restored="$(mysql_query "SELECT name FROM users ORDER BY id;")"
+  [[ "$restored" == *"Alice Mueller"* ]]
+  [[ "$restored" == *"Bob Schmidt"* ]]
+  [[ "$restored" == *"Charlie Weber"* ]]
+  [[ "$restored" != *"INTRUDER"* ]]
+  restored_count="$(mysql_query "SELECT count(*) FROM users;")"
+  [ "$restored_count" -eq 3 ]
+
+  rm -f "$archive"
+  rm -rf /tmp/parbackup/test_mysql-* 2> /dev/null || true
 }
 
 #

@@ -1,0 +1,10 @@
+# Parbackupfile - Test: MySQL backup/restore
+BACKUP_NAME="test_mysql"
+
+SERVICES="app_mysql"
+
+APP_MYSQL_TYPE="mysql"
+APP_MYSQL_CONTAINER="parbackup-test-mysql"
+APP_MYSQL_USER="testuser"
+APP_MYSQL_PASSWORD="testpass"
+APP_MYSQL_DB="testdb"
