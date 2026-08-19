@@ -3,9 +3,10 @@
 # par-server-tools installer.
 #
 # Installs all tools (parbackup, paralert) to a bin directory on the host.
-# Intended to be run directly on a server, e.g.:
+# Intended to be run directly on a server. The one-liner prompts for a token
+# (hidden input) and uses it to fetch this script and to clone the repo:
 #
-#   export CODEBERG_TOKEN=<token>
+#   read -rsp "Codeberg token: " CODEBERG_TOKEN && echo && export CODEBERG_TOKEN
 #   bash -c "$(curl -fsSL -H "Authorization: token $CODEBERG_TOKEN" \
 #     https://codeberg.org/parthec/par-server-tools/raw/branch/main/install.sh)"
 #

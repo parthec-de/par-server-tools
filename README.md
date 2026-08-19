@@ -10,16 +10,19 @@ Collection of server tools for deployments. One directory per tool.
 ## Installation
 
 Install all tools to `/usr/local/bin` on a server. The repository is private, so
-authentication is required — pass a [Codeberg access token](https://codeberg.org/user/settings/applications):
+authentication is required — the one-liner prompts for a
+[Codeberg access token](https://codeberg.org/user/settings/applications)
+(input is hidden):
 
 ```bash
-export CODEBERG_TOKEN=<your-token>
+read -rsp "Codeberg token: " CODEBERG_TOKEN && echo && export CODEBERG_TOKEN
 bash -c "$(curl -fsSL -H "Authorization: token $CODEBERG_TOKEN" \
   https://codeberg.org/parthec/par-server-tools/raw/branch/main/install.sh)"
 ```
 
 The token is used both to fetch the installer and (via `CODEBERG_TOKEN`) to clone
-the repository. Overrides: `PAR_BINDIR` (install dir), `PAR_REF` (branch/tag).
+the repository. For non-interactive use (CI), set `CODEBERG_TOKEN` beforehand and
+skip the first line. Overrides: `PAR_BINDIR` (install dir), `PAR_REF` (branch/tag).
 
 Alternatively, clone the repo and run the installer directly:
 
