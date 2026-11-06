@@ -10,12 +10,11 @@ Collection of server tools for deployments. One directory per tool.
 ## Installation
 
 Clone the repository into `/usr/local/share/par-server-tools` and run the
-installer, which symlinks each tool into `/usr/local/bin`. The repository is
-private, so `git clone` prompts for your Codeberg credentials interactively.
-Run as root so it can write to `/usr/local`:
+installer, which symlinks each tool into `/usr/local/bin`. Run as root so it
+can write to `/usr/local`:
 
 ```bash
-sh -c 'git clone https://codeberg.org/parthec/par-server-tools.git /usr/local/share/par-server-tools && /usr/local/share/par-server-tools/install.sh'
+sh -c 'test -d /usr/local/share/par-server-tools || git clone https://codeberg.org/parthec/par-server-tools.git /usr/local/share/par-server-tools; /usr/local/share/par-server-tools/install.sh'
 ```
 
 Override the install prefix with `PAR_PREFIX` (default `/usr/local`).
@@ -24,3 +23,7 @@ Override the install prefix with `PAR_PREFIX` (default `/usr/local`).
 
 Re-run the command above. It is idempotent: if the repository already exists the
 installer pulls the latest changes, and existing symlinks are left untouched.
+
+## License
+
+[Apache License 2.0](./LICENSE), attribution in [NOTICE](./NOTICE).
