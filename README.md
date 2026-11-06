@@ -14,15 +14,20 @@ installer, which symlinks each tool into `/usr/local/bin`. Run as root so it
 can write to `/usr/local`:
 
 ```bash
-sh -c 'test -d /usr/local/share/par-server-tools || git clone https://codeberg.org/parthec/par-server-tools.git /usr/local/share/par-server-tools; /usr/local/share/par-server-tools/install.sh'
+git clone https://codeberg.org/parthec/par-server-tools.git /usr/local/share/par-server-tools
+/usr/local/share/par-server-tools/install.sh
 ```
 
 Override the install prefix with `PAR_PREFIX` (default `/usr/local`).
 
 ## Update
 
-Re-run the command above. It is idempotent: if the repository already exists the
-installer pulls the latest changes, and existing symlinks are left untouched.
+Re-run the installer. It pulls the latest changes and leaves existing symlinks
+untouched:
+
+```bash
+/usr/local/share/par-server-tools/install.sh
+```
 
 ## License
 
