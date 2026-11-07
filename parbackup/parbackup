@@ -24,24 +24,11 @@ script_invocation="$0 $*"
 parbackupfile_name="${PARBACKUPFILE:-Parbackupfile}"
 config_dir="${HOME}/.config/par"
 config_file="${config_dir}/parbackup.conf"
-color_primary="#415a77"
-color_secondary="#aaa"
 working_dir="/tmp/parbackup"
 run_log_dir="${working_dir}/runs"
 
 ensure_working_dir() {
   mkdir -p "$working_dir"
-}
-
-print_banner() {
-  gum style \
-    --border normal --margin "1" --padding "1 2" \
-    --border-background "$color_secondary" \
-    --border-foreground "$color_primary" \
-    --background "$color_primary" \
-    --foreground "$color_secondary" \
-    "par digital e.K. -- Backup Manager" \
-    "v$script_version"
 }
 
 BACKUP_LOG_FILE=""
@@ -116,6 +103,8 @@ fail_help() {
 
 print_help() {
   cat << EOF
+$script_name v$script_version -- backup manager for Docker deployments
+
 Usage: parbackup <command> [options]
 
 Commands:
@@ -1400,15 +1389,12 @@ subcommand="${1:-}"
 
 # Check if first argument is a help flag
 if [[ "$subcommand" == "-h" || "$subcommand" == "--help" || "$subcommand" == "" ]]; then
-  print_banner
   print_help
   exit 0
 fi
 
 # Skip the subcommand argument
 shift
-
-print_banner
 
 # Handle sub-commands
 case "$subcommand" in
