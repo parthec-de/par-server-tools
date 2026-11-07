@@ -18,7 +18,7 @@ install_gum() {
 }
 
 script_name="paralert"
-script_version="1.1.0"
+script_version="1.2.0"
 config_dir="${HOME}/.config/par"
 config_file="${config_dir}/paralert.conf"
 
