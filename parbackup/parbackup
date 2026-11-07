@@ -277,6 +277,9 @@ s3_cmd() {
     # Explicitly add `--no-ssl`, if we're dealing with an HTTP endpoint.
     extra_args+=(--no-ssl)
   fi
+  if [[ -n "${S3_REGION:-}" ]]; then
+    extra_args+=(--region="$S3_REGION")
+  fi
 
   s3cmd \
     --access_key="$S3_ACCESS_KEY" \
@@ -929,6 +932,7 @@ S3_ENDPOINT='$(_sq "${S3_ENDPOINT:-}")'
 S3_BUCKET='$(_sq "${S3_BUCKET:-}")'
 S3_ACCESS_KEY='$(_sq "${S3_ACCESS_KEY:-}")'
 S3_SECRET_KEY='$(_sq "${S3_SECRET_KEY:-}")'
+S3_REGION='$(_sq "${S3_REGION:-}")'
 RETENTION_DAYS='$(_sq "${RETENTION_DAYS:-7}")'
 EOF
   chmod 600 "$config_file"
@@ -946,6 +950,8 @@ config_set_s3() {
     --header "S3 Access Key" --value "${S3_ACCESS_KEY:-}")"
   S3_SECRET_KEY="$(gum input --placeholder "secret key" --password \
     --header "S3 Secret Key" --value "${S3_SECRET_KEY:-}")"
+  S3_REGION="$(gum input --placeholder "empty = provider default" \
+    --header "S3 Region (optional, e.g. us-east-1)" --value "${S3_REGION:-}")"
   RETENTION_DAYS="$(gum input --placeholder "7" \
     --header "Retention period in days (0 = disabled)" --value "${RETENTION_DAYS:-7}")"
 
@@ -983,6 +989,7 @@ command_config() {
       echo "S3_BUCKET        = ${S3_BUCKET:-<not set>}"
       echo "S3_ACCESS_KEY    = $(mask_secret "${S3_ACCESS_KEY:-}")"
       echo "S3_SECRET_KEY    = $(mask_secret "${S3_SECRET_KEY:-}")"
+      echo "S3_REGION        = ${S3_REGION:-<not set>}"
       echo "RETENTION_DAYS   = ${RETENTION_DAYS:-<not set>}"
       ;;
 

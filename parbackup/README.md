@@ -20,6 +20,8 @@ Configure the S3 backend interactively:
 parbackup config set
 ```
 
+`S3_REGION` is optional. Leave it empty for providers that ignore the signing region (e.g. Hetzner). Set it for providers that validate it, e.g. `us-east-1` for AWS or RustFS.
+
 This saves credentials to `~/.config/par/parbackup.conf`. View current config:
 
 ```bash
