@@ -3,7 +3,7 @@
 set -euo pipefail
 
 install_pkg() {
-  sudo apt update && sudo apt install $1
+  sudo apt-get update && sudo apt-get install -y "$1"
 }
 
 install_gum() {
