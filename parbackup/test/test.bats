@@ -12,10 +12,11 @@ COMPOSE_FILE="${TEST_DIR}/docker-compose.yaml"
 PATH="$(cd "${TEST_DIR}/../../paralert" && pwd):${PATH}"
 export PATH
 
-MINIO_ENDPOINT="http://localhost:29000"
-MINIO_ACCESS_KEY="minioadmin"
-MINIO_SECRET_KEY="minioadmin"
-MINIO_BUCKET="parbackup-test"
+TEST_S3_ENDPOINT="http://localhost:29000"
+TEST_S3_ACCESS_KEY="testaccess"
+TEST_S3_SECRET_KEY="testsecret"
+TEST_S3_BUCKET="parbackup-test"
+TEST_S3_REGION="us-east-1"
 
 MAILPIT_SMTP_HOST="localhost"
 MAILPIT_SMTP_PORT="21025"
@@ -67,9 +68,9 @@ wait_for_dbs() {
   return 1
 }
 
-wait_for_minio() {
+wait_for_s3() {
   for i in $(seq 1 30); do
-    if curl -sf "${MINIO_ENDPOINT}/minio/health/live" > /dev/null 2>&1; then
+    if curl -sf "${TEST_S3_ENDPOINT}/health" > /dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -77,30 +78,32 @@ wait_for_minio() {
   return 1
 }
 
-setup_minio() {
-  wait_for_minio
+setup_s3() {
+  wait_for_s3
 
   # Create test bucket via s3cmd
   local host
-  host="$(echo "$MINIO_ENDPOINT" | sed 's|https\?://||')"
+  host="$(echo "$TEST_S3_ENDPOINT" | sed 's|https\?://||')"
 
   s3cmd \
-    --access_key="$MINIO_ACCESS_KEY" \
-    --secret_key="$MINIO_SECRET_KEY" \
+    --access_key="$TEST_S3_ACCESS_KEY" \
+    --secret_key="$TEST_S3_SECRET_KEY" \
     --host="$host" \
     --host-bucket="$host/%(bucket)" \
+    --region="$TEST_S3_REGION" \
     --no-ssl \
-    mb "s3://${MINIO_BUCKET}" 2> /dev/null || true
+    mb "s3://${TEST_S3_BUCKET}" 2> /dev/null || true
 
-  # Write parbackup config pointing to MinIO
+  # Write parbackup config pointing to the test S3 server
   export TEST_CONFIG_DIR
   TEST_CONFIG_DIR="$(mktemp -d /tmp/parbackup-test-config-XXXXXX)"
   mkdir -p "${TEST_CONFIG_DIR}/.config/par"
   cat > "${TEST_CONFIG_DIR}/.config/par/parbackup.conf" << EOF
-S3_ENDPOINT="${MINIO_ENDPOINT}"
-S3_BUCKET="${MINIO_BUCKET}"
-S3_ACCESS_KEY="${MINIO_ACCESS_KEY}"
-S3_SECRET_KEY="${MINIO_SECRET_KEY}"
+S3_ENDPOINT="${TEST_S3_ENDPOINT}"
+S3_BUCKET="${TEST_S3_BUCKET}"
+S3_ACCESS_KEY="${TEST_S3_ACCESS_KEY}"
+S3_SECRET_KEY="${TEST_S3_SECRET_KEY}"
+S3_REGION="${TEST_S3_REGION}"
 EOF
 }
 
@@ -209,7 +212,7 @@ setup_file() {
   # Start stack
   docker compose -f "$COMPOSE_FILE" up -d
   wait_for_dbs
-  setup_minio
+  setup_s3
   wait_for_mailpit
   seed_uploads
   seed_local_dir
@@ -688,10 +691,10 @@ EOF
 }
 
 #
-# Test: S3 backend round-trip (via local MinIO)
+# Test: S3 backend round-trip (via local RustFS)
 #
 
-@test "s3: create uploads backup to MinIO" {
+@test "s3: create uploads backup to S3" {
   run env HOME="$TEST_CONFIG_DIR" bash -c "cd '$TEST_DIR' && '$PARBACKUP' create 2>&1"
   [ "$status" -eq 0 ]
   [[ "$output" == *"S3 upload complete"* ]]
@@ -788,7 +791,7 @@ EOF
   [[ "$output" == *"Missing required argument"* ]]
 }
 
-@test "s3: restore round-trip from MinIO preserves data" {
+@test "s3: restore round-trip from S3 preserves data" {
   # Determine the S3 key by listing — output is keys, one per line
   local list_output
   list_output="$(env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" ls test_deployment/ 2>&1)"

@@ -53,17 +53,18 @@ services:
       - ./init-mysql:/docker-entrypoint-initdb.d
       - mysqldata:/var/lib/mysql
 
-  minio:
-    image: minio/minio:latest
-    container_name: parbackup-test-minio
+  # S3-compatible object storage. RustFS validates the signing region,
+  # so the test config sets S3_REGION.
+  s3:
+    image: rustfs/rustfs:1.0.4
+    container_name: parbackup-test-s3
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      RUSTFS_ACCESS_KEY: testaccess
+      RUSTFS_SECRET_KEY: testsecret
     ports:
       - "29000:9000"
-    command: server /data
     volumes:
-      - miniodata:/data
+      - s3data:/data
 
   # Simple container with a volume for testing the 'volume' service type.
   # Simulates e.g. Strapi uploads or any file-based data.
@@ -104,5 +105,5 @@ volumes:
   pgdata_defaultdb:
   mongodata:
   mysqldata:
-  miniodata:
+  s3data:
   uploads:
