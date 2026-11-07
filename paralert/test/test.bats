@@ -64,6 +64,7 @@ ALERT_SMTP_PORT='31025'
 ALERT_SMTP_USER='backups@test.local'
 ALERT_SMTP_PASSWORD='p@$$w0rd$FZ=x!'
 ALERT_SMTP_FROM='backups@test.local'
+ALERT_SMTP_INSECURE='true'
 ALERT_RECIPIENTS='admin@test.local'
 CONF
 }
@@ -139,6 +140,37 @@ EOF
 
   sleep 1
   [ "$(mailpit_message_count)" -eq 0 ]
+
+  rm -rf "$home_dir"
+}
+
+@test "send: refuses to send without TLS (exit non-zero, no email)" {
+  mailpit_clear
+
+  local home_dir
+  home_dir="$(mktemp -d /tmp/paralert-test-home-XXXXXX)"
+  write_paralert_config "$home_dir"
+  # MailPit offers no STARTTLS, so a TLS-enforcing send must fail
+  sed -i "/^ALERT_SMTP_INSECURE=/d" "${home_dir}/.config/par/paralert.conf"
+
+  run env HOME="$home_dir" "$PARALERT" send --subject "Must not be sent" --body "nope"
+  [ "$status" -ne 0 ]
+
+  sleep 1
+  [ "$(mailpit_message_count)" -eq 0 ]
+
+  rm -rf "$home_dir"
+}
+
+@test "send: exits non-zero when the SMTP server is unreachable" {
+  local home_dir
+  home_dir="$(mktemp -d /tmp/paralert-test-home-XXXXXX)"
+  write_paralert_config "$home_dir"
+  sed -i "s/^ALERT_SMTP_PORT=.*/ALERT_SMTP_PORT='1'/" "${home_dir}/.config/par/paralert.conf"
+
+  run env HOME="$home_dir" "$PARALERT" send --subject "Unreachable" --body "nope"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Failed to send notification email"* ]]
 
   rm -rf "$home_dir"
 }

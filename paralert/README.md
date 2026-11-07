@@ -34,11 +34,16 @@ ALERT_SMTP_USER=''        # SMTP user (empty = no auth)
 ALERT_SMTP_PASSWORD=''    # SMTP password
 ALERT_SMTP_FROM=''        # From address
 ALERT_RECIPIENTS=''       # Comma-separated recipient list
+ALERT_SMTP_INSECURE=''    # 'true' disables TLS, for local test servers only
 ```
+
+TLS is mandatory: port 465 uses implicit TLS, any other port STARTTLS. If the
+server offers neither, sending fails instead of falling back to plain text.
 
 If `ALERT_SMTP_HOST`, `ALERT_SMTP_FROM`, or `ALERT_RECIPIENTS` are unset,
 `paralert send` exits successfully without sending anything (alerting is
-optional and must never break the calling tool).
+optional). If sending fails, it exits non-zero. Calling tools that must not
+break on a failed alert append `|| true`.
 
 ## Usage
 

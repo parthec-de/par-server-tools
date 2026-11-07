@@ -169,6 +169,7 @@ ALERT_SMTP_PORT='21025'
 ALERT_SMTP_USER='backups@test.local'
 ALERT_SMTP_PASSWORD='p@$$w0rd$FZ=x!'
 ALERT_SMTP_FROM='backups@test.local'
+ALERT_SMTP_INSECURE='true'
 ALERT_RECIPIENTS='admin@test.local'
 CONF
 }
@@ -1056,6 +1057,7 @@ ALERT_SMTP_PORT='21025'
 ALERT_SMTP_USER='backups@test.local'
 ALERT_SMTP_PASSWORD='p@$$w0rd$FZ=x!'
 ALERT_SMTP_FROM='backups@test.local'
+ALERT_SMTP_INSECURE='true'
 ALERT_RECIPIENTS='admin@test.local'
 EOF
 
@@ -1321,6 +1323,7 @@ ALERT_SMTP_PORT='21025'
 ALERT_SMTP_USER='backups@test.local'
 ALERT_SMTP_PASSWORD='p@$$w0rd$FZ=x!'
 ALERT_SMTP_FROM='backups@test.local'
+ALERT_SMTP_INSECURE='true'
 ALERT_RECIPIENTS='admin@test.local'
 EOF
 

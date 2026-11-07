@@ -125,6 +125,7 @@ ALERT_SMTP_USER='$(_sq "${ALERT_SMTP_USER:-}")'
 ALERT_SMTP_PASSWORD='$(_sq "${ALERT_SMTP_PASSWORD:-}")'
 ALERT_SMTP_FROM='$(_sq "${ALERT_SMTP_FROM:-}")'
 ALERT_RECIPIENTS='$(_sq "${ALERT_RECIPIENTS:-}")'
+ALERT_SMTP_INSECURE='$(_sq "${ALERT_SMTP_INSECURE:-}")'
 EOF
   chmod 600 "$config_file"
   info "Config saved to $config_file"
@@ -143,7 +144,19 @@ _send_email() {
   fi
 
   local smtp_port="${ALERT_SMTP_PORT:-587}"
-  local smtp_url="smtp://${ALERT_SMTP_HOST}:${smtp_port}"
+
+  # TLS is mandatory: implicit TLS on port 465, STARTTLS on any other port.
+  # ALERT_SMTP_INSECURE='true' disables it for local test servers only.
+  local smtp_scheme="smtp"
+  local -a tls_args=()
+  if [[ "${ALERT_SMTP_INSECURE:-}" != "true" ]]; then
+    if [[ "$smtp_port" == "465" ]]; then
+      smtp_scheme="smtps"
+    else
+      tls_args+=(--ssl-reqd)
+    fi
+  fi
+  local smtp_url="${smtp_scheme}://${ALERT_SMTP_HOST}:${smtp_port}"
 
   # Build recipient list for curl (one --mail-rcpt per address)
   local -a rcpt_args=()
@@ -178,11 +191,13 @@ _send_email() {
 
   if ! curl --silent --show-error \
     --url "$smtp_url" \
+    "${tls_args[@]}" \
     --mail-from "$ALERT_SMTP_FROM" \
     "${rcpt_args[@]}" \
     "${auth_args[@]}" \
     -T - <<< "$message" 2>&1; then
     error "Failed to send notification email"
+    return 1
   fi
 }
 
@@ -346,6 +361,9 @@ command_config() {
       echo "ALERT_SMTP_PASSWORD = $(mask_secret "${ALERT_SMTP_PASSWORD:-}")"
       echo "ALERT_SMTP_FROM     = ${ALERT_SMTP_FROM:-<not set>}"
       echo "ALERT_RECIPIENTS    = ${ALERT_RECIPIENTS:-<not set>}"
+      if [[ "${ALERT_SMTP_INSECURE:-}" == "true" ]]; then
+        echo "ALERT_SMTP_INSECURE = true (TLS disabled, test servers only)"
+      fi
       ;;
 
     *)
