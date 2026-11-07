@@ -1,3 +1,5 @@
+name: paralert-test
+
 services:
   mailpit:
     image: axllent/mailpit:latest

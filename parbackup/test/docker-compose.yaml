@@ -1,3 +1,5 @@
+name: parbackup-test
+
 services:
   postgres:
     image: postgres:18.1-alpine3.23
