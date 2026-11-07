@@ -1307,6 +1307,10 @@ command_restore() {
 
     local local_archive
     local_archive="$(command_download "${download_args[@]}")"
+    # command_download runs in a subshell, so its "exit 0" on cancel only ends the subshell.
+    if [[ -z "$local_archive" ]]; then
+      exit 0
+    fi
 
     extracted_tmp="$(mktemp -d "${working_dir}/restore-XXXXXX")"
     info "Extracting $local_archive..."

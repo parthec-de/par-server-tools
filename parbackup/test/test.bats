@@ -785,6 +785,34 @@ EOF
   rm -f "$expected_file"
 }
 
+@test "s3: restore stops when the download is cancelled" {
+  local list_output
+  list_output="$(env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" ls test_deployment/ 2>&1)"
+  local s3_key
+  s3_key="$(echo "$list_output" | grep -o "test_deployment/test_deployment-[^ ]*" | head -1)"
+  [ -n "$s3_key" ]
+
+  local existing_file="/tmp/parbackup/$(basename "$s3_key")"
+  echo "dummy" > "$existing_file"
+
+  # setsid detaches from the terminal, so the "Overwrite?" prompt fails and counts as "no"
+  run setsid -w env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" restore "$s3_key" < /dev/null 2>&1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Download cancelled"* ]]
+  [[ "$output" != *"Extracting"* ]]
+  [ "$(cat "$existing_file")" = "dummy" ]
+
+  rm -f "$existing_file"
+}
+
+@test "s3: restore --pick stops when no backup is selected" {
+  # setsid detaches from the terminal, so the picker returns no selection, like Ctrl+C
+  run setsid -w env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" restore --pick < /dev/null 2>&1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No backup selected"* ]]
+  [[ "$output" != *"Extracting"* ]]
+}
+
 @test "s3: download fails without backup_ref" {
   run env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" download 2>&1
   [ "$status" -eq 1 ]
