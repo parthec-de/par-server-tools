@@ -6,7 +6,7 @@
 # Idempotent: updates the repo with git pull if it is a git repo, and leaves
 # existing symlinks untouched. Run it from the cloned repo, e.g.:
 #
-#   git clone https://codeberg.org/parthec/par-server-tools.git \
+#   git clone https://github.com/parthec-de/par-server-tools.git \
 #     /usr/local/share/par-server-tools
 #   /usr/local/share/par-server-tools/install.sh
 #

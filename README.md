@@ -14,7 +14,7 @@ installer, which symlinks each tool into `/usr/local/bin`. Run as root so it
 can write to `/usr/local`:
 
 ```bash
-git clone https://codeberg.org/parthec/par-server-tools.git /usr/local/share/par-server-tools
+git clone https://github.com/parthec-de/par-server-tools.git /usr/local/share/par-server-tools
 /usr/local/share/par-server-tools/install.sh
 ```
 
