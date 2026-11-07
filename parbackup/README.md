@@ -1,6 +1,6 @@
 # parbackup
 
-Backup tool for Docker-based deployments. Creates online dumps of Postgres and MongoDB databases running in Docker containers, backs up Docker volumes and local directories, packages them as `.tar.gz`, and uploads to S3.
+Backup tool for Docker-based deployments. Creates online dumps of Postgres, MySQL and MongoDB databases running in Docker containers, backs up Docker volumes and local directories, packages them as `.tar.gz`, and uploads to S3.
 
 ## Requirements
 
@@ -9,6 +9,8 @@ Backup tool for Docker-based deployments. Creates online dumps of Postgres and M
 - [gum](https://github.com/charmbracelet/gum) (auto-installed if missing)
 - [s3cmd](https://s3tools.org/s3cmd) (auto-installed if missing, only needed for S3)
 - [rsync](https://rsync.samba.org/) (auto-installed if missing, only needed for `dir` restore)
+
+Auto-installation uses `apt` and therefore works on Debian and Ubuntu only. On other distributions, install the tools beforehand.
 
 ## Setup
 
@@ -100,8 +102,8 @@ parbackup ls --timestamps
 # Delete backups older than retention period (configured via RETENTION_DAYS)
 parbackup cleanup
 
-# Download a backup from S3 to /tmp/
-parbackup download my_project/parbackup-my_project-2026-02-27_14-30-22.tar.gz
+# Download a backup from S3 to /tmp/parbackup/
+parbackup download my_project/my_project-2026-02-27_14-30-22.tar.gz
 
 # Interactively pick a backup from S3 to download (fuzzy search)
 parbackup download --pick
@@ -110,13 +112,13 @@ parbackup download --pick
 parbackup restore --pick
 
 # Restore from S3 (prompts for confirmation)
-parbackup restore my_project/parbackup-my_project-2026-02-27_14-30-22.tar.gz
+parbackup restore my_project/my_project-2026-02-27_14-30-22.tar.gz
 
 # Restore from local tar.gz or directory
-parbackup restore --local /tmp/parbackup-my_project-2026-02-27_14-30-22.tar.gz
+parbackup restore --local /tmp/parbackup/my_project-2026-02-27_14-30-22.tar.gz
 
 # Skip confirmation prompt
-parbackup restore --force --local /tmp/parbackup-my_project-2026-02-27_14-30-22.tar.gz
+parbackup restore --force --local /tmp/parbackup/my_project-2026-02-27_14-30-22.tar.gz
 
 # Schedule backups via cron
 parbackup cron -f /path/to/Parbackupfile
@@ -128,14 +130,14 @@ parbackup cron remove -f /path/to/Parbackupfile
 parbackup updateself
 ```
 
-Backups are written to `/tmp/parbackup-<BACKUP_NAME>-<timestamp>.tar.gz`. The archive contains one subdirectory per service, the `Parbackupfile`, and a `parbackup.log` with timestamped log output from the backup run. On S3, backups are stored under `<BACKUP_NAME>/` prefix.
+Backups are written to `/tmp/parbackup/<BACKUP_NAME>-<timestamp>.tar.gz`. The archive contains one subdirectory per service, the `Parbackupfile`, and a `parbackup.log` with timestamped log output from the backup run. On S3, backups are stored under `<BACKUP_NAME>/` prefix.
 
 ### Logging
 
 Each `parbackup create` run produces two log files:
 
 - **Backup log** (`parbackup.log`) — included inside the `.tar.gz` archive. Contains timestamped entries for each backup step up to packaging. Useful for auditing what happened during a specific backup.
-- **Run log** (`/tmp/parbackup-runs/run-XXXXXXXXXX.log`) — an ephemeral log that captures the entire run including S3 upload and post-packaging steps. The first two entries are always the full command invocation and the current working directory. Automatically deleted on success; kept on failure for debugging. If [paralert](../paralert/) is configured, the run log content is included in the error notification email (see [Error notifications](#error-notifications)).
+- **Run log** (`/tmp/parbackup/runs/run-XXXXXXXXXX.log`) — an ephemeral log that captures the entire run including S3 upload and post-packaging steps. The first two entries are always the full command invocation and the current working directory. Automatically deleted on success; kept on failure for debugging. If [paralert](../paralert/) is configured, the run log content is included in the error notification email (see [Error notifications](#error-notifications)).
 
 ### Download
 
@@ -143,16 +145,16 @@ Use `download` to fetch a backup archive from S3 without restoring it:
 
 ```bash
 # Download by S3 key
-parbackup download my_project/parbackup-my_project-2026-02-27_14-30-22.tar.gz
+parbackup download my_project/my_project-2026-02-27_14-30-22.tar.gz
 
 # Interactively pick a backup to download (fuzzy search)
 parbackup download --pick
 
 # Overwrite an existing local file without prompting
-parbackup download --force my_project/parbackup-my_project-2026-02-27_14-30-22.tar.gz
+parbackup download --force my_project/my_project-2026-02-27_14-30-22.tar.gz
 ```
 
-The archive is saved to `/tmp/`. `restore` uses `download` internally when fetching from S3.
+The archive is saved to `/tmp/parbackup/`. `restore` uses `download` internally when fetching from S3.
 
 ### Restore
 
@@ -160,16 +162,16 @@ By default, `restore` downloads from S3 and restores immediately. Use `--local` 
 
 ```bash
 # Restore from S3 (prompts for confirmation)
-parbackup restore my_project/parbackup-my_project-2026-02-27_14-30-22.tar.gz
+parbackup restore my_project/my_project-2026-02-27_14-30-22.tar.gz
 
 # Interactively pick a backup to restore
 parbackup restore --pick
 
 # Restore from a local archive
-parbackup restore --local /tmp/parbackup-my_project-2026-02-27_14-30-22.tar.gz
+parbackup restore --local /tmp/parbackup/my_project-2026-02-27_14-30-22.tar.gz
 
 # Skip confirmation prompt
-parbackup restore --force --local /tmp/parbackup-my_project-2026-02-27_14-30-22.tar.gz
+parbackup restore --force --local /tmp/parbackup/my_project-2026-02-27_14-30-22.tar.gz
 ```
 
 ### Retention
@@ -216,7 +218,7 @@ See the [paralert README](../paralert/README.md) for the available SMTP settings
 
 ## Development
 
-A test deployment is included in `./test/` with Postgres, MongoDB, a Docker volume container, and a local directory, plus seed data.
+A test deployment is included in `./test/` with Postgres, MySQL, MongoDB, a Docker volume container, and a local directory, plus seed data.
 
 ### Running the test stack manually
 
@@ -224,7 +226,7 @@ A test deployment is included in `./test/` with Postgres, MongoDB, a Docker volu
 cd test/
 docker compose up -d
 ../parbackup create --local
-../parbackup restore --local --force /tmp/parbackup-test_deployment-<timestamp>.tar.gz
+../parbackup restore --local --force /tmp/parbackup/test_deployment-<timestamp>.tar.gz
 docker compose down -v
 ```
 

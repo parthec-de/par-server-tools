@@ -9,7 +9,7 @@ host `PATH`.
 
 - Bash
 - curl
-- [gum](https://github.com/charmbracelet/gum) (used for `config` and styled log output)
+- [gum](https://github.com/charmbracelet/gum) (used for `config` and styled log output, auto-installed via `apt` on Debian and Ubuntu if missing)
 
 ## Setup
 
