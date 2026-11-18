@@ -183,6 +183,8 @@ seed_uploads() {
     echo 'fake-image-data-1' > /app/public/uploads/images/logo.png
     echo 'fake-image-data-2' > /app/public/uploads/images/banner.jpg
     echo 'hello world' > /app/public/uploads/readme.txt
+    chown -R 1000:82 /app/public/uploads/images
+    chmod 660 /app/public/uploads/readme.txt
   "
 }
 
@@ -290,9 +292,19 @@ teardown_file() {
   tar -tzf "$BACKUP_ARCHIVE" | grep -q "app_mongo/dump.archive"
 }
 
-@test "backup: archive contains app_uploads volume files" {
-  tar -tzf "$BACKUP_ARCHIVE" | grep -q "app_uploads/images/logo.png"
-  tar -tzf "$BACKUP_ARCHIVE" | grep -q "app_uploads/readme.txt"
+@test "backup: archive contains app_uploads volume as tar stream with owners" {
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  tar -xzf "$BACKUP_ARCHIVE" -C "$tmpdir"
+  local volume_tar
+  volume_tar="$(find "$tmpdir" -path "*/app_uploads/volume.tar")"
+  [ -f "$volume_tar" ]
+
+  local listing
+  listing="$(tar -tvf "$volume_tar" --numeric-owner)"
+  echo "$listing" | grep -qE '^-.* 1000/82 .*images/logo\.png$'
+  echo "$listing" | grep -qE '^-rw-rw---- 0/0 .*readme\.txt$'
+  rm -rf "$tmpdir"
 }
 
 @test "backup: archive contains app_static directory files" {
@@ -425,6 +437,37 @@ teardown_file() {
   [ ! -f "/tmp/parbackup-test-localdir/evil.html" ]
   run cat /tmp/parbackup-test-localdir/css/style.css
   [[ "$output" == *"body { color: red }"* ]]
+}
+
+@test "restore: volume keeps owner and mode" {
+  run docker exec parbackup-test-uploads \
+    stat -c '%n %u:%g %a' /app/public/uploads/images/logo.png /app/public/uploads/readme.txt
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"logo.png 1000:82 644"* ]]
+  [[ "$output" == *"readme.txt 0:0 660"* ]]
+}
+
+@test "restore: archive without volume.tar restores plain volume files" {
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+  tar -xzf "$BACKUP_ARCHIVE" -C "$tmpdir"
+  local name
+  name="$(basename "$(find "$tmpdir" -mindepth 1 -maxdepth 1 -type d)")"
+  local svc_dir="$tmpdir/$name/app_uploads"
+  tar -xf "$svc_dir/volume.tar" -C "$svc_dir"
+  rm "$svc_dir/volume.tar"
+  local legacy_archive="/tmp/parbackup/${name}-legacy.tar.gz"
+  tar -czf "$legacy_archive" -C "$tmpdir" "$name"
+
+  docker exec parbackup-test-uploads sh -c "rm -rf /app/public/uploads/*"
+
+  run env HOME="$ISOLATED_HOME" "$PARBACKUP" restore --local --force "$legacy_archive"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No volume.tar found"* ]]
+  run docker exec parbackup-test-uploads cat /app/public/uploads/readme.txt
+  [[ "$output" == *"hello world"* ]]
+
+  rm -rf "$tmpdir" "$legacy_archive"
 }
 
 #

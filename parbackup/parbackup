@@ -505,7 +505,8 @@ backup_volume() {
 
   info "  Copying '$path' from container '$container'..."
 
-  docker cp "$container:$path/." "$target_dir/" \
+  # A tar stream keeps owner and mode, a plain 'docker cp' to the host resets them to the caller
+  docker cp "$container:$path/." - > "$target_dir/volume.tar" \
     2> >(_tee_to_log "docker cp") \
     || fail "docker cp failed for '$path' from container '$container'"
 
@@ -525,8 +526,15 @@ restore_volume() {
   # Clear existing files, then copy backup contents into the volume
   docker exec "$container" sh -c "rm -rf '${path:?}/'*" \
     || fail "Failed to clear '$path' in container '$container'"
-  docker cp "$source_dir/." "$container:$path/" \
-    || fail "docker cp failed for '$path' into container '$container'"
+  if [[ -f "$source_dir/volume.tar" ]]; then
+    docker cp - "$container:$path/" < "$source_dir/volume.tar" \
+      || fail "docker cp failed for '$path' into container '$container'"
+  else
+    # Archives before v1.7.0 hold plain files without owner information
+    warn "  No volume.tar found, restoring plain files, ownership falls back to root"
+    docker cp "$source_dir/." "$container:$path/" \
+      || fail "docker cp failed for '$path' into container '$container'"
+  fi
 
   info "  Volume restore complete for '$path'"
 }

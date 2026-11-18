@@ -77,7 +77,7 @@ APP_STATIC_PATH="/opt/my-project/static"
 - **`postgres`** — Online `pg_dump`/`pg_restore` of a Postgres database running in a Docker container.
 - **`mongo`** — Online `mongodump`/`mongorestore` of a MongoDB database running in a Docker container.
 - **`mysql`** — Online `mysqldump --single-transaction`/`mysql` restore of a MySQL database running in a Docker container. Restore drops and recreates the target database first.
-- **`volume`** — Copies files from a Docker container path via `docker cp`. Useful for named volumes (e.g. upload directories). Restore clears the target path first.
+- **`volume`** — Copies files from a Docker container path as a `docker cp` tar stream, stored as `volume.tar`, so owner and mode survive the round trip. Useful for named volumes (e.g. upload directories). Restore clears the target path first. Archives without `volume.tar` restore as plain files owned by root.
 - **`dir`** — Copies a local directory via `cp -a`. Restore uses `rsync --delete` for a clean sync. Useful for bind-mounted host directories or any local path.
 
 ## Usage
