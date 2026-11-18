@@ -1,100 +1,80 @@
 # paralert
 
-Standalone alert-notification tool for par server tools. Sends notification
-emails via SMTP (using `curl`). Other tools (e.g. [parbackup](../parbackup/))
-delegate their alerting to `paralert`, which is assumed to be installed on the
-host `PATH`.
+Email alerts via SMTP from the command line. parbackup sends its failure alerts through paralert. On its own, paralert checks disk usage and reports failing commands or cron jobs.
 
 ## Requirements
 
-- Bash
-- curl
-- [gum](https://github.com/charmbracelet/gum) (used for `config` and styled log output, auto-installed via `apt` on Debian and Ubuntu if missing)
+- **Bash**
+- **curl:** for sending emails
+- **[gum](https://github.com/charmbracelet/gum):** for `config` and log output, auto-installed via `apt` on Debian and Ubuntu
 
-## Setup
-
-Configure SMTP interactively:
+## Configuration
 
 ```bash
-paralert config set
+paralert config set   # configure interactively
+paralert config       # show the current configuration
 ```
 
-This saves settings to `~/.config/par/paralert.conf`. View current config:
+The settings live in `~/.config/par/paralert.conf`:
 
-```bash
-paralert config
-```
+| Key                   | Purpose                                          | Default |
+| --------------------- | ------------------------------------------------ | ------- |
+| `ALERT_SMTP_HOST`     | SMTP server                                      |         |
+| `ALERT_SMTP_PORT`     | SMTP port                                        | `587`   |
+| `ALERT_SMTP_USER`     | SMTP user, empty disables authentication         |         |
+| `ALERT_SMTP_PASSWORD` | SMTP password                                    |         |
+| `ALERT_SMTP_FROM`     | Sender address                                   |         |
+| `ALERT_RECIPIENTS`    | Comma-separated recipients                       |         |
+| `ALERT_SMTP_INSECURE` | `true` disables TLS, for local test servers only |         |
 
-Configuration keys (`~/.config/par/paralert.conf`):
-
-```bash
-ALERT_SMTP_HOST=''        # SMTP server host
-ALERT_SMTP_PORT='587'     # SMTP server port
-ALERT_SMTP_USER=''        # SMTP user (empty = no auth)
-ALERT_SMTP_PASSWORD=''    # SMTP password
-ALERT_SMTP_FROM=''        # From address
-ALERT_RECIPIENTS=''       # Comma-separated recipient list
-ALERT_SMTP_INSECURE=''    # 'true' disables TLS, for local test servers only
-```
-
-TLS is mandatory: port 465 uses implicit TLS, any other port STARTTLS. If the
-server offers neither, sending fails instead of falling back to plain text.
-
-If `ALERT_SMTP_HOST`, `ALERT_SMTP_FROM`, or `ALERT_RECIPIENTS` are unset,
-`paralert send` exits successfully without sending anything (alerting is
-optional). If sending fails, it exits non-zero. Calling tools that must not
-break on a failed alert append `|| true`.
+- **TLS is mandatory:** port 465 uses implicit TLS, every other port STARTTLS. Without TLS, sending fails instead of falling back to plain text.
+- **Alerting is optional:** without host, sender or recipients, `paralert send` exits successfully without sending anything.
+- **Failed sends exit non-zero:** callers that must not break on a failed alert append `|| true`.
 
 ## Usage
 
-```bash
-# Body as an argument
-paralert send --subject "Backup FAILED" --body "See attached log."
+### Send an alert
 
-# Body from stdin (when --body is omitted)
+```bash
+paralert send --subject "Backup FAILED" --body "See attached log."
 cat run.log | paralert send --subject "Backup FAILED"
 ```
 
-### Disk usage check
+Without `--body`, the body is read from stdin.
 
-Alert when the usage of a filesystem reaches a threshold (default `/`, 90%):
+### Check disk usage
 
 ```bash
 paralert check-disk --threshold 90 --path /
 ```
 
-Nothing is sent while usage stays below the threshold.
+An alert goes out once usage reaches the threshold. The defaults are `90` percent on `/`.
 
-### Run a command and alert on failure
-
-Run any command; if it exits non-zero, paralert sends an alert with the captured
-output as the body:
+### Alert on a failing command
 
 ```bash
 paralert run --subject "Cert renew failed" -- certbot renew
 ```
 
-### Scheduled checks (cron)
+On a non-zero exit, the alert contains the output of the command.
 
-`paralert cron` interactively installs a cron job that alerts via paralert. Pick
-between two types — you choose the schedule and, respectively, the disk-usage
-threshold or the command to run:
-
-- **Disk Usage** — schedule + threshold; runs `check-disk` on that schedule.
-- **Custom** — schedule + subject + command; runs `run` (alert on non-zero exit).
+### Schedule checks
 
 ```bash
 paralert cron          # add a cron job interactively
-paralert cron show     # list paralert cron entries
+paralert cron show     # list paralert cron jobs
 paralert cron remove   # remove one interactively
 ```
 
-Entries are tagged with a `# paralert:<type>` marker in your crontab.
+| Type       | Asks for                   | Runs         | Crontab marker             |
+| ---------- | -------------------------- | ------------ | -------------------------- |
+| Disk Usage | schedule, threshold, path  | `check-disk` | `# paralert:disk`          |
+| Custom     | schedule, subject, command | `run`        | `# paralert:custom-<slug>` |
 
 ## Development
 
-A MailPit-based test stack is included in `./test/`.
+The tests run against a MailPit SMTP server from `./test/`:
 
 ```bash
-bats test/test.bats
+mise run test:paralert
 ```
