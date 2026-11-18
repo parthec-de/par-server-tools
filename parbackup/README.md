@@ -63,6 +63,7 @@ APP_STATIC_PATH="/opt/my-project/static"
 | ----------------- | ------------------------------------------------------- |
 | `BACKUP_NAME`     | Name of this deployment (used in backup directory name) |
 | `SERVICES`        | Comma-separated list of service names                   |
+| `RETENTION_DAYS`  | Optional, overrides the configured retention for this backup (`0` keeps it forever) |
 | `<SVC>_TYPE`      | Service type: `postgres`, `mongo`, `mysql`, `volume`, or `dir` |
 | `<SVC>_CONTAINER` | Docker container name (`postgres`, `mongo`, `mysql`, `volume`) |
 | `<SVC>_USER`      | Database user (`postgres`, `mongo`, `mysql`)           |
@@ -176,7 +177,26 @@ parbackup restore --force --local /tmp/parbackup/my_project-2026-02-27_14-30-22.
 
 ### Retention
 
-Set `RETENTION_DAYS` via `parbackup config set` to automatically delete old backups. When configured, old backups are cleaned up after each successful `create`. You can also run `parbackup cleanup` manually. Set to `0` to disable.
+Set `RETENTION_DAYS` via `parbackup config set` to automatically delete old backups. Set to `0` to disable.
+
+After each successful `create`, parbackup cleans up only backups under the same `BACKUP_NAME`. A `RETENTION_DAYS` in the Parbackupfile overrides the configured value for that backup. This allows different schedules per Parbackupfile, e.g. a weekly backup with a longer retention or a one-off backup with `RETENTION_DAYS="0"`:
+
+```bash
+BACKUP_NAME="my_project_assets"
+RETENTION_DAYS="28"
+```
+
+Run the cleanup manually:
+
+```bash
+# Clean up the backups of one Parbackupfile, using its RETENTION_DAYS
+parbackup cleanup -f /path/to/Parbackupfile
+
+# Clean up the whole bucket with the configured RETENTION_DAYS
+parbackup cleanup
+```
+
+Without `-f`, the cleanup ignores `RETENTION_DAYS` from Parbackupfiles and also deletes backups that are meant to be kept longer.
 
 ### Cron
 

@@ -188,6 +188,25 @@ seed_uploads() {
   "
 }
 
+# Write a Parbackupfile that backs up the seeded local dir under the given BACKUP_NAME.
+# Usage: write_scoped_parbackupfile <path> <backup_name> [retention_days]
+write_scoped_parbackupfile() {
+  local path="$1"
+  local name="$2"
+  local retention="${3:-}"
+  {
+    echo "BACKUP_NAME=\"${name}\""
+    [[ -n "$retention" ]] && echo "RETENTION_DAYS=\"${retention}\""
+    echo 'SERVICES="static"'
+    echo 'STATIC_TYPE="dir"'
+    echo 'STATIC_PATH="/tmp/parbackup-test-localdir"'
+  } > "$path"
+}
+
+s3_backup_count() {
+  env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" ls "$1/" 2> /dev/null | grep -c "^$1/" || true
+}
+
 seed_local_dir() {
   export TEST_LOCAL_DIR="/tmp/parbackup-test-localdir"
   rm -rf "$TEST_LOCAL_DIR"
@@ -231,6 +250,7 @@ teardown_file() {
   rm -rf /tmp/parbackup/test_deployment-* 2> /dev/null || true
   rm -rf /tmp/parbackup/test_defaultdb-* 2> /dev/null || true
   rm -rf /tmp/parbackup/test_mysql-* 2> /dev/null || true
+  rm -rf /tmp/parbackup/test_scope* 2> /dev/null || true
   rm -rf /tmp/parbackup/restore-* 2> /dev/null || true
   rm -rf /tmp/parbackup-test-localdir 2> /dev/null || true
   rm -rf "${TEST_CONFIG_DIR:-}" 2> /dev/null || true
@@ -996,6 +1016,68 @@ EOF
 
   # Verify the runs directory itself still exists
   [ -d "/tmp/parbackup/runs" ]
+}
+
+@test "cleanup: create only cleans up backups of its own BACKUP_NAME" {
+  local daily="${BATS_TEST_TMPDIR}/Parbackupfile.daily"
+  local other="${BATS_TEST_TMPDIR}/Parbackupfile.other"
+  write_scoped_parbackupfile "$daily" "test_scope"
+  write_scoped_parbackupfile "$other" "test_scope_assets"
+  echo 'RETENTION_DAYS="7"' >> "${TEST_CONFIG_DIR}/.config/par/parbackup.conf"
+
+  run env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" create -f "$other" 2>&1
+  [ "$status" -eq 0 ]
+  [ "$(s3_backup_count test_scope_assets)" -eq 1 ]
+
+  # 30 days ahead every existing backup is past the 7-day retention
+  local future_now=$(($(date +%s) + 30 * 86400))
+  run env HOME="$TEST_CONFIG_DIR" _NOW="$future_now" "$PARBACKUP" create -f "$daily" 2>&1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Cleaning up backups of 'test_scope' older than 7 day(s)"* ]]
+  [ "$(s3_backup_count test_scope_assets)" -eq 1 ]
+}
+
+@test "cleanup: RETENTION_DAYS=0 in the Parbackupfile keeps its backups" {
+  local keep="${BATS_TEST_TMPDIR}/Parbackupfile.keep"
+  write_scoped_parbackupfile "$keep" "test_scope_assets" "0"
+
+  local future_now=$(($(date +%s) + 30 * 86400))
+  run env HOME="$TEST_CONFIG_DIR" _NOW="$future_now" "$PARBACKUP" create -f "$keep" 2>&1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Retention is disabled"* ]]
+  [ "$(s3_backup_count test_scope_assets)" -eq 2 ]
+}
+
+@test "cleanup: -f uses the Parbackupfile RETENTION_DAYS and only its temp files" {
+  local assets="${BATS_TEST_TMPDIR}/Parbackupfile.assets"
+  local daily="${BATS_TEST_TMPDIR}/Parbackupfile.daily"
+  write_scoped_parbackupfile "$assets" "test_scope_assets" "60"
+  write_scoped_parbackupfile "$daily" "test_scope"
+  run env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" create -f "$daily" 2>&1
+  [ "$status" -eq 0 ]
+  [ "$(s3_backup_count test_scope)" -eq 1 ]
+
+  local own_temp="/tmp/parbackup/test_scope_assets-2020-01-01_03-00-00.tar.gz"
+  local foreign_temp="/tmp/parbackup/test_scope-2020-01-01_03-00-00.tar.gz"
+  echo "old" > "$own_temp"
+  echo "old" > "$foreign_temp"
+  touch -d "90 days ago" "$own_temp" "$foreign_temp"
+
+  # Within 60 days nothing is deleted, although the config says 7
+  local in_30_days=$(($(date +%s) + 30 * 86400))
+  run env HOME="$TEST_CONFIG_DIR" _NOW="$in_30_days" "$PARBACKUP" cleanup -f "$assets" 2>&1
+  [ "$status" -eq 0 ]
+  [ "$(s3_backup_count test_scope_assets)" -eq 2 ]
+
+  local in_90_days=$(($(date +%s) + 90 * 86400))
+  run env HOME="$TEST_CONFIG_DIR" _NOW="$in_90_days" "$PARBACKUP" cleanup -f "$assets" 2>&1
+  [ "$status" -eq 0 ]
+  [ "$(s3_backup_count test_scope_assets)" -eq 0 ]
+  [ "$(s3_backup_count test_scope)" -eq 1 ]
+  [ ! -f "$own_temp" ]
+  [ -f "$foreign_temp" ]
+
+  rm -f "$foreign_temp" /tmp/parbackup/test_scope-* /tmp/parbackup/test_scope_assets-*
 }
 
 #

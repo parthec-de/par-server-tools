@@ -133,6 +133,7 @@ Command-specific options:
 
   cleanup:
     --dry-run          Show which backups would be deleted, without deleting
+    -f, --file <path>  Only clean up backups of this Parbackupfile, using its RETENTION_DAYS
 
   cron:
     -f, --file <path>  Path to Parbackupfile (required for add/remove)
@@ -184,8 +185,24 @@ require_parbackupfile() {
   fi
 
   info "Loading $backupfile..."
+
+  # RETENTION_DAYS may come from both the config and the Parbackupfile. Keep the
+  # Parbackupfile value in BACKUP_RETENTION_DAYS and leave the config value intact.
+  local config_retention_set=false config_retention=""
+  if [[ -v RETENTION_DAYS ]]; then
+    config_retention_set=true
+    config_retention="$RETENTION_DAYS"
+  fi
+  unset RETENTION_DAYS
+
   # shellcheck source=/dev/null
   source "$backupfile"
+
+  BACKUP_RETENTION_DAYS="${RETENTION_DAYS:-}"
+  unset RETENTION_DAYS
+  if [[ "$config_retention_set" == true ]]; then
+    RETENTION_DAYS="$config_retention"
+  fi
 
   # Validate required top-level variables
   if [[ -z "${BACKUP_NAME:-}" ]]; then
@@ -651,12 +668,17 @@ command_ls() {
 
 command_cleanup() {
   local dry_run=false
+  local backupfile=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dry-run)
         dry_run=true
         shift
+        ;;
+      -f | --file)
+        backupfile="$2"
+        shift 2
         ;;
       *)
         error "Unknown option: $1"
@@ -667,7 +689,15 @@ command_cleanup() {
 
   require_config
 
+  # With a Parbackupfile, only its own backups are cleaned up, using its RETENTION_DAYS
+  local scope=""
   local retention_days="${RETENTION_DAYS:-0}"
+  if [[ -n "$backupfile" ]]; then
+    require_parbackupfile "$backupfile"
+    scope="$BACKUP_NAME"
+    retention_days="${BACKUP_RETENTION_DAYS:-${RETENTION_DAYS:-0}}"
+  fi
+
   if [[ "$retention_days" == "0" || -z "$retention_days" ]]; then
     info "Retention is disabled (RETENTION_DAYS=0). Nothing to clean up."
     return 0
@@ -677,7 +707,11 @@ command_cleanup() {
   local now="${_NOW:-$(date +%s)}"
   local cutoff=$((now - retention_seconds))
 
-  info "Cleaning up backups older than ${retention_days} day(s)..."
+  if [[ -n "$scope" ]]; then
+    info "Cleaning up backups of '${scope}' older than ${retention_days} day(s)..."
+  else
+    info "Cleaning up backups older than ${retention_days} day(s)..."
+  fi
 
   # --- Clean up old local temp files in working_dir ---
   local tmp_deleted=0
@@ -687,6 +721,10 @@ command_cleanup() {
       [[ -e "$item" ]] || continue
       # Skip the runs directory itself (only its contents are cleaned below)
       [[ "$item" == "$run_log_dir" ]] && continue
+      # Matching the timestamp keeps "test" from also catching "test-foo"
+      if [[ -n "$scope" && "$(basename "$item")" != "${scope}"-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]_* ]]; then
+        continue
+      fi
 
       local item_mtime
       item_mtime="$(stat -c '%Y' "$item" 2> /dev/null)" || continue
@@ -731,7 +769,7 @@ command_cleanup() {
 
   # --- Clean up old remote S3 backups ---
   local ts_list
-  ts_list="$(command_ls --timestamps 2> /dev/null)"
+  ts_list="$(command_ls --timestamps "${scope:+${scope}/}" 2> /dev/null)"
 
   if [[ -z "$ts_list" ]]; then
     info "No remote backups found."
@@ -913,8 +951,8 @@ command_create() {
     s3_upload "$archive" "$s3_key"
     info "S3 upload complete"
 
-    # Auto-cleanup old backups
-    command_cleanup
+    # Auto-cleanup old backups of this Parbackupfile only
+    command_cleanup -f "$backupfile"
   fi
 
   # Clear error notification trap on success
