@@ -124,6 +124,7 @@ Options:
 Command-specific options:
   create:
     --local            Skip S3 upload (no config needed)
+    --keep-local       Keep the local archive after the S3 upload
     -f, --file <path>  Path to Parbackupfile (default: ./Parbackupfile)
 
   ls:
@@ -836,6 +837,7 @@ command_create() {
   ensure_working_dir
 
   local local_only=false
+  local keep_local=false
   local backupfile=""
 
   # Parse options
@@ -843,6 +845,10 @@ command_create() {
     case "$1" in
       --local)
         local_only=true
+        shift
+        ;;
+      --keep-local)
+        keep_local=true
         shift
         ;;
       -f | --file)
@@ -945,11 +951,19 @@ command_create() {
   info "Removed temporary directory $backup_dir"
 
   # Upload to S3
+  local result="$archive"
   if [[ "$local_only" != true ]]; then
     local s3_key="${BACKUP_NAME}/${backup_name}.tar.gz"
     info "Uploading to S3: s3://${S3_BUCKET}/${s3_key}"
     s3_upload "$archive" "$s3_key"
     info "S3 upload complete"
+
+    # The S3 copy is enough, local copies would fill the disk over the retention period
+    if [[ "$keep_local" != true ]]; then
+      rm -f "$archive"
+      info "Removed local archive $archive"
+      result="s3://${S3_BUCKET}/${s3_key}"
+    fi
 
     # Auto-cleanup old backups of this Parbackupfile only
     command_cleanup -f "$backupfile"
@@ -958,7 +972,7 @@ command_create() {
   # Clear error notification trap on success
   trap - EXIT
 
-  info "Backup complete: $archive"
+  info "Backup complete: $result"
 
   # Clean up the run log on success
   rm -f "$RUN_LOG_FILE"

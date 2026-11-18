@@ -767,6 +767,22 @@ EOF
   export S3_BACKUP_ARCHIVE
   S3_BACKUP_ARCHIVE="$(echo "$output" | grep "Uploading to S3:" | sed 's/.*Uploading to S3: s3:\/\/[^/]*\///')"
   [ -n "$S3_BACKUP_ARCHIVE" ]
+
+  # The local archive is removed after the upload
+  [[ "$output" == *"Backup complete: s3://${TEST_S3_BUCKET}/${S3_BACKUP_ARCHIVE}"* ]]
+  [ ! -f "/tmp/parbackup/$(basename "$S3_BACKUP_ARCHIVE")" ]
+}
+
+@test "s3: create --keep-local keeps the local archive" {
+  run env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" create --keep-local -f "$TEST_DIR/Parbackupfile" 2>&1
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"S3 upload complete"* ]]
+  [[ "$output" != *"Removed local archive"* ]]
+
+  local archive
+  archive="$(echo "$output" | grep "Backup complete:" | sed 's/.*Backup complete: //')"
+  [ -f "$archive" ]
+  rm -f "$archive"
 }
 
 @test "s3: ls shows uploaded backup" {
