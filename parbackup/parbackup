@@ -18,7 +18,7 @@ install_gum() {
 }
 
 script_name="parbackup"
-script_version="1.7.0"
+script_version="1.8.0"
 script_invocation="$0 $*"
 parbackupfile_name="${PARBACKUPFILE:-Parbackupfile}"
 config_dir="${HOME}/.config/par"
