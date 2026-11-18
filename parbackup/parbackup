@@ -19,7 +19,6 @@ install_gum() {
 
 script_name="parbackup"
 script_version="1.7.0"
-script_dir="$(dirname "$(readlink -f "$0")")"
 script_invocation="$0 $*"
 parbackupfile_name="${PARBACKUPFILE:-Parbackupfile}"
 config_dir="${HOME}/.config/par"
@@ -115,7 +114,6 @@ Commands:
   cleanup     Delete backups older than retention period
   cron        Manage cron schedule for automated backups
   config      Show or set configuration (S3)
-  updateself  Update $script_name script
   help        Show this help message
 
 Options:
@@ -591,14 +589,6 @@ restore_dir() {
   rsync -a --delete "$source_dir/" "$dir_path/"
 
   info "  Directory restore complete for '$dir_path'"
-}
-
-command_updateself() {
-  info "Updating $script_name..."
-  pushd "$script_dir" > /dev/null
-  git pull
-  popd > /dev/null
-  info "Done."
 }
 
 command_ls() {
@@ -1469,7 +1459,6 @@ shift
 
 # Handle sub-commands
 case "$subcommand" in
-  updateself) command_updateself "$@" ;;
   create) command_create "$@" ;;
   download) command_download "$@" ;;
   ls) command_ls "$@" ;;

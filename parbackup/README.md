@@ -153,12 +153,6 @@ parbackup cron remove -f /opt/my-project/Parbackupfile
 
 Without `--schedule`, parbackup asks for the frequency. Each entry carries the marker `# parbackup:<BACKUP_NAME>`, so each `BACKUP_NAME` has at most one entry.
 
-### Update
-
-```bash
-parbackup updateself
-```
-
 ## Logs and alerts
 
 - **Backup log:** `parbackup.log` in the archive, with every step up to packaging
