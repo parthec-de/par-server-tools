@@ -736,6 +736,71 @@ manifest_host_path() {
   awk -F'\t' -v svc="$svc_name" '$1 == svc { print $3; exit }' "$manifest"
 }
 
+# Print "<service>\t<type>" for every service of a Parbackupfile.
+list_backup_services() {
+  ( 
+    # shellcheck source=/dev/null
+    source "$1"
+
+    [[ -z "${SERVICES:-}" ]] && return 0
+
+    IFS=',' read -ra services <<< "$SERVICES"
+    local svc var
+    for svc in "${services[@]}"; do
+      svc="$(echo "$svc" | xargs)"
+      var="${svc^^}_TYPE"
+      printf '%s\t%s\n' "$svc" "${!var:-}"
+    done
+  )
+}
+
+# Print what a backup holds, one line per path or service directory.
+# Usage: show_backup_contents <Parbackupfile> [manifest] [staging path]
+show_backup_contents() {
+  local backupfile="$1"
+  local manifest="${2:-}"
+  local staging="${3:-}"
+  local base="${staging:-${backupfile%/*}}"
+
+  local -A host_paths=()
+  local svc type host_path
+  if [[ -s "$manifest" ]]; then
+    while IFS=$'\t' read -r svc type host_path; do
+      [[ -n "$svc" ]] && host_paths["$svc"]="$host_path"
+    done < "$manifest"
+  fi
+
+  local -a services=()
+  local -a all=()
+  local dbs=""
+  while IFS=$'\t' read -r svc type; do
+    [[ -z "$svc" ]] && continue
+
+    case "$type" in
+      postgres | mysql | mongo)
+        dbs+="${dbs:+, }${svc} (${type})"
+        ;;
+      volume | dir)
+        services+=("${host_paths[$svc]:-$base/$svc}"$'\t'"${type}: ${svc}")
+        ;;
+    esac
+  done < <(list_backup_services "$backupfile")
+
+  [[ -n "$dbs" ]] && all+=("${base}"$'\t'"dumps: ${dbs}")
+  [[ ${#services[@]} -gt 0 ]] && all+=("${services[@]}")
+  [[ ${#all[@]} -eq 0 ]] && all+=("${base}"$'\t'"backup")
+
+  local width=0 row path
+  for row in "${all[@]}"; do
+    path="${row%%$'\t'*}"
+    ((${#path} > width)) && width="${#path}"
+  done
+
+  for row in "${all[@]}"; do
+    printf '  %-*s  %s\n' "$width" "${row%%$'\t'*}" "${row#*$'\t'}"
+  done
+}
+
 # --- Backup/Restore helpers ---
 
 backup_postgres() {
@@ -2324,6 +2389,7 @@ command_restore() {
   local backup_dir=""
   local restore_root=""
   local prompted=false
+  local summary_shown=false
 
   load_config || true
 
@@ -2418,6 +2484,24 @@ command_restore() {
         fail "No restic repository at $repository"
       fi
 
+      # Read the metadata from the snapshot, the restore itself follows the prompt
+      local staging_path meta_dir
+      staging_path="${restic_staging_root}/${RESTORE_REPO_NAME}"
+      meta_dir="$(mktemp -d "${working_dir}/meta-XXXXXX")"
+
+      if ! restic_cmd "$repository" dump "$RESTORE_SNAPSHOT" "${staging_path}/Parbackupfile" > "${meta_dir}/Parbackupfile" 2> >(_tee_to_log "restic dump"); then
+        rm -rf "$meta_dir"
+        fail "Snapshot $RESTORE_SNAPSHOT has no Parbackupfile at ${staging_path}/Parbackupfile"
+      fi
+      restic_cmd "$repository" dump "$RESTORE_SNAPSHOT" "${staging_path}/parbackup.manifest" > "${meta_dir}/parbackup.manifest" 2> /dev/null || true
+
+      info "Snapshot ${RESTORE_REPO_NAME}/${RESTORE_SNAPSHOT} contains:"
+      while IFS= read -r line; do
+        info "$line"
+      done < <(show_backup_contents "${meta_dir}/Parbackupfile" "${meta_dir}/parbackup.manifest" "$staging_path")
+      rm -rf "$meta_dir"
+      summary_shown=true
+
       if [[ "$force" != true ]]; then
         warn "You are about to restore deployment '$RESTORE_REPO_NAME' from: $repository ($RESTORE_SNAPSHOT)"
         warn "This will DROP and recreate all databases listed in the backup."
@@ -2439,6 +2523,13 @@ command_restore() {
 
   if [[ -n "$restore_root" && -n "${RESTORE_REPO_NAME:-}" && "$BACKUP_NAME" != "$RESTORE_REPO_NAME" ]]; then
     warn "Snapshot belongs to '$BACKUP_NAME', repository is named '$RESTORE_REPO_NAME'"
+  fi
+
+  if [[ "$summary_shown" != true ]]; then
+    info "Backup $(basename "$backup_dir") contains:"
+    while IFS= read -r line; do
+      info "$line"
+    done < <(show_backup_contents "${backup_dir}/Parbackupfile" "${backup_dir}/parbackup.manifest" "")
   fi
 
   if [[ "$force" != true && "$prompted" != true ]]; then

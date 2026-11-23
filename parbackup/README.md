@@ -161,7 +161,7 @@ parbackup restore my_project/1a2b3c4d                              # restic snap
 parbackup restore --local /tmp/parbackup/my_project-2026-02-27_14-30-22.tar.gz
 ```
 
-Restore asks for confirmation. `--force` skips it. `--local` accepts a `.tar.gz`, an unpacked builtin backup or an unpacked restic restore tree.
+Restore asks for confirmation and shows every service with its type and path first. `--force` skips the question. `--local` accepts a `.tar.gz`, an unpacked builtin backup or an unpacked restic restore tree.
 
 Volumes are restored through `docker cp` from the snapshot data, directories through `rsync --delete`. A restore as root keeps owner and mode. A restore as a regular user cannot set uid and gid.
 

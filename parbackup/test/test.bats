@@ -236,15 +236,16 @@ setup_file() {
   export RESTIC_SECRET
   RESTIC_SECRET="${RESTIC_CONFIG_DIR}/restic-secret"
 
+  # Host directory of the bind mount, created before compose so the container
+  # keeps it owned by the test user
+  export PARBACKUP_TEST_BIND
+  PARBACKUP_TEST_BIND="$(mktemp -d /tmp/parbackup-test-bind-XXXXXX)"
+  echo 'bind-data' > "${PARBACKUP_TEST_BIND}/hello.txt"
+  chmod 640 "${PARBACKUP_TEST_BIND}/hello.txt"
+
   # Clean previous state
   docker compose -f "$COMPOSE_FILE" down -v --remove-orphans 2> /dev/null || true
   rm -rf /tmp/parbackup/test_deployment-* 2> /dev/null || true
-
-  # Host directory of the bind mount, readable without root
-  rm -rf /tmp/parbackup-test-bind
-  mkdir -p /tmp/parbackup-test-bind
-  echo 'bind-data' > /tmp/parbackup-test-bind/hello.txt
-  chmod 640 /tmp/parbackup-test-bind/hello.txt
 
   # Start stack
   docker compose -f "$COMPOSE_FILE" up -d
@@ -290,7 +291,7 @@ teardown_file() {
   rm -rf /tmp/parbackup/test_scope* 2> /dev/null || true
   rm -rf /tmp/parbackup/restore-* 2> /dev/null || true
   rm -rf /tmp/parbackup-test-localdir 2> /dev/null || true
-  rm -rf /tmp/parbackup-test-bind 2> /dev/null || true
+  rm -rf "${PARBACKUP_TEST_BIND:-}" 2> /dev/null || true
   rm -rf "${TEST_CONFIG_DIR:-}" 2> /dev/null || true
   rm -rf "${ISOLATED_HOME:-}" 2> /dev/null || true
   rm -rf "${PARBACKUP_STAGING_ROOT:-}" 2> /dev/null || true
@@ -463,6 +464,10 @@ teardown_file() {
   run env HOME="$ISOLATED_HOME" "$PARBACKUP" restore --local --force "$BACKUP_ARCHIVE"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Restore complete"* ]]
+  [[ "$output" == *"contains:"* ]]
+  [[ "$output" == *"dumps: app_db (postgres), app_mongo (mongo)"* ]]
+  [[ "$output" == *"volume: app_uploads"* ]]
+  [[ "$output" == *"dir: app_static"* ]]
 
   # Verify postgres
   pg_result="$(pg_query "SELECT name FROM users ORDER BY id;")"
@@ -1740,7 +1745,7 @@ EOF
 
   run restic_parbackup create -f "$backupfile"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Reading '/tmp/parbackup-test-bind' in place"* ]]
+  [[ "$output" == *"Reading '${PARBACKUP_TEST_BIND}' in place"* ]]
 
   local snapshot_id
   snapshot_id="$(restic_cli test_restic_bind snapshots --json 2> /dev/null | grep -o '"short_id":"[a-f0-9]*"' | head -1 | cut -d'"' -f4)"
@@ -1748,22 +1753,23 @@ EOF
 
   local listing
   listing="$(restic_cli test_restic_bind ls "$snapshot_id" 2> /dev/null)"
-  echo "$listing" | grep -q "/tmp/parbackup-test-bind/hello.txt"
+  echo "$listing" | grep -q "${PARBACKUP_TEST_BIND}/hello.txt"
   echo "$listing" | grep -q "${PARBACKUP_STAGING_ROOT}/test_restic_bind/parbackup.manifest"
 
-  rm -f /tmp/parbackup-test-bind/hello.txt
-  echo 'TAMPERED' > /tmp/parbackup-test-bind/evil.txt
+  rm -f "${PARBACKUP_TEST_BIND}/hello.txt"
+  echo 'TAMPERED' > "${PARBACKUP_TEST_BIND}/evil.txt"
 
   run restic_parbackup restore --force "$(oldest_snapshot_ref test_restic_bind)"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Restore complete"* ]]
   [[ "$output" == *"Copying 1 file(s)"* ]]
+  [[ "$output" == *"volume: bind"* ]]
 
-  run cat /tmp/parbackup-test-bind/hello.txt
+  run cat "${PARBACKUP_TEST_BIND}/hello.txt"
   [[ "$output" == *"bind-data"* ]]
-  [ ! -f /tmp/parbackup-test-bind/evil.txt ]
+  [ ! -f "${PARBACKUP_TEST_BIND}/evil.txt" ]
 
-  run stat -c '%a' /tmp/parbackup-test-bind/hello.txt
+  run stat -c '%a' "${PARBACKUP_TEST_BIND}/hello.txt"
   [ "$output" = "640" ]
 }
 
@@ -1815,6 +1821,9 @@ EOF
   run restic_parbackup restore --force "$snapshot_ref"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Restore complete"* ]]
+  [[ "$output" == *"contains:"*"dumps:"*"Restoring snapshot"* ]]
+  [[ "$output" == *"volume: app_uploads"* ]]
+  [[ "$output" == *"dir: app_static"* ]]
 
   local pg_result
   pg_result="$(pg_query "SELECT name FROM users ORDER BY id;")"
