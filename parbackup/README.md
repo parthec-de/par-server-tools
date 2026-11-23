@@ -13,10 +13,10 @@ The result is processed by one of two backends, see [Backends](#backends).
 - **Docker**
 - **[gum](https://github.com/charmbracelet/gum):** log output and interactive prompts
 - **[s3cmd](https://s3tools.org/s3cmd):** only for S3
-- **[restic](https://restic.net/):** only for the restic backend, 0.16 or newer
+- **[restic](https://restic.net/):** only for the restic backend
 - **[rsync](https://rsync.samba.org/):** only for restoring `dir` services
 
-parbackup installs missing tools via `apt` on Debian and Ubuntu only. restic 0.16 or newer compresses by default and prunes faster than older releases. A pinned version from `mise` or NixOS is preferable to the distribution package.
+parbackup installs missing tools via `apt` on Debian and Ubuntu only. restic 0.16 or newer is required. It compresses by default and prunes faster than older releases. A pinned version from `mise` or NixOS is preferable to the distribution package.
 
 ## Backends
 

@@ -20,7 +20,7 @@ Back up and restore entire Docker Compose deployments with one config file and o
 - **One file per deployment:** a `Parbackupfile` lists databases, volumes and directories.
 - **One-command restore:** `parbackup restore --pick` restores everything, databases included.
 - **Matching dump versions:** dumps run inside the database container via `docker exec`.
-- **Nothing in the background:** Only bash and cron, no daemon, no container.
+- **Nothing in the background:** Only bash and cron.
 - **Tested end to end:** real Postgres, MySQL, MongoDB, S3, restic and SMTP in the test suites.
 
 ## How it works
@@ -49,11 +49,9 @@ flowchart LR
 
 ## Quick start
 
-```bash
-# Install (as root)
-git clone https://github.com/parthec-de/par-server-tools.git /usr/local/share/par-server-tools
-/usr/local/share/par-server-tools/install.sh
+Once [installed](#installation):
 
+```bash
 # Configure S3, the backend and, optionally, alert emails
 parbackup config set
 paralert config set
