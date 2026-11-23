@@ -46,7 +46,7 @@ _warn_old_restic() {
 }
 
 script_name="parbackup"
-script_version="1.10.0"
+script_version="1.10.1"
 script_invocation="$0 $*"
 parbackupfile_name="${PARBACKUPFILE:-Parbackupfile}"
 config_dir="${HOME}/.config/par"
