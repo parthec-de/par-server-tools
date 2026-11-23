@@ -1,3 +1,7 @@
+[tools]
+# restic 0.16 or newer, the backend relies on compression by default
+restic = "0.19.1"
+
 [tasks."test:parbackup"]
 description = "Run parbackup bats integration tests"
 dir = "parbackup"

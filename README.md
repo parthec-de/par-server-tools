@@ -4,16 +4,21 @@ Back up and restore entire Docker Compose deployments with one config file and o
 
 ## Tools
 
-- [**parbackup**](./parbackup/): backup and restore of Postgres, MySQL and MongoDB databases, Docker volumes and host directories to S3, with retention and cron scheduling.
-- [**paralert**](./paralert/): email alerts via SMTP with mandatory TLS. parbackup uses it for failure alerts. On its own, it alerts on disk usage and on failing commands or cron jobs.
+- [**parbackup**](./parbackup/): backup and restore of Docker deployments
+  - Postgres, MySQL and MongoDB dumps, Docker volumes and host directories in one Parbackupfile
+  - Retention, cron scheduling and failure alerts
+  - Two backends: a self-contained `.tar.gz` per run on S3, or deduplicated and encrypted restic snapshots
+- [**paralert**](./paralert/): email alerts over SMTP with mandatory TLS
+  - parbackup reports failed backups through it
+  - On its own it reports disk usage and failing commands or cron jobs
 
 ## Motivation
 
-- **One file per deployment:** a `Parbackupfile` lists databases, volumes and directories. Each backup is a single self-describing `.tar.gz`.
-- **One-command restore:** `parbackup restore --pick` restores everything from S3, databases included.
+- **One file per deployment:** a `Parbackupfile` lists databases, volumes and directories.
+- **One-command restore:** `parbackup restore --pick` restores everything, databases included.
 - **Matching dump versions:** dumps run inside the database container via `docker exec`.
-- **Nothing in the background:** Bash and cron, no daemon, no container.
-- **Tested end to end:** real Postgres, MySQL, MongoDB, S3 and SMTP in the test suites.
+- **Nothing in the background:** Only bash and cron, no daemon, no container.
+- **Tested end to end:** real Postgres, MySQL, MongoDB, S3, restic and SMTP in the test suites.
 
 ## How it works
 
@@ -29,10 +34,12 @@ flowchart LR
   end
   PF --> PB
   DB -- "docker exec dump" --> PB
-  VOL -- "docker cp" --> PB
-  DIR -- "cp -a" --> PB
+  VOL -- "host path or docker cp" --> PB
+  DIR -- "host path or cp -a" --> PB
   PB -- "tar.gz" --> S3[("S3")]
+  PB -- "deduplicated snapshots" --> RS[("restic repository")]
   S3 -- "restore --pick" --> PB
+  RS -- "restore --pick" --> PB
   PB -.->|"failure + run log"| PA
   PA -- "SMTP (TLS)" --> MAIL["Email"]
 ```
@@ -44,7 +51,7 @@ flowchart LR
 git clone https://github.com/parthec-de/par-server-tools.git /usr/local/share/par-server-tools
 /usr/local/share/par-server-tools/install.sh
 
-# Configure S3 and, optionally, alert emails
+# Configure S3, the backend and, optionally, alert emails
 parbackup config set
 paralert config set
 
@@ -58,9 +65,8 @@ parbackup restore --pick
 
 ## Limitations
 
-- **No encryption:** archives are plain `.tar.gz`, including the `Parbackupfile` with its database passwords. Keep the bucket private.
-- **No deduplication or incremental backups:** every run uploads a full archive.
-- **S3 only** as remote target.
+- **Builtin backend:** no encryption and no deduplication, every run uploads a full archive, including the `Parbackupfile` with its database passwords. Keep the bucket private.
+- **S3 only** as remote target, for both backends.
 - **Email only** as alert channel.
 - **Single host:** no central overview across servers.
 - **Debian and Ubuntu** for auto-installing dependencies (`apt`).
@@ -69,9 +75,10 @@ parbackup restore --pick
 
 **parbackup**
 
-- [restic](https://restic.net/): encrypted, deduplicated backups to many backends. Database dumps and their restore are up to you.
 - [offen/docker-volume-backup](https://github.com/offen/docker-volume-backup): runs as a container in the compose stack and backs up volumes. Database dumps via custom hooks, manual restore.
 - [nfrastack/db-backup](https://github.com/nfrastack/db-backup): databases only, but nine engines, incremental backups and encryption.
+
+restic is available as a backend of parbackup. Standalone, it writes encrypted, deduplicated snapshots to many storage types (local disk, SFTP, S3, B2, Azure, GCS), but leaves the database dumps and their restore to you.
 
 **paralert**
 

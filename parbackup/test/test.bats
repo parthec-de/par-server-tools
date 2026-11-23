@@ -226,9 +226,25 @@ setup_file() {
   ISOLATED_HOME="$(mktemp -d /tmp/parbackup-test-iso-XXXXXX)"
   mkdir -p "${ISOLATED_HOME}/.config/par"
 
+  # restic staging and cache live outside /var/cache, the tests do not run as root
+  export PARBACKUP_STAGING_ROOT
+  PARBACKUP_STAGING_ROOT="$(mktemp -d /tmp/parbackup-test-staging-XXXXXX)"
+  export RESTIC_CONFIG_DIR
+  RESTIC_CONFIG_DIR="$(mktemp -d /tmp/parbackup-test-restic-XXXXXX)"
+  export RESTIC_CACHE_DIR
+  RESTIC_CACHE_DIR="$(mktemp -d /tmp/parbackup-test-restic-cache-XXXXXX)"
+  export RESTIC_SECRET
+  RESTIC_SECRET="${RESTIC_CONFIG_DIR}/restic-secret"
+
   # Clean previous state
   docker compose -f "$COMPOSE_FILE" down -v --remove-orphans 2> /dev/null || true
   rm -rf /tmp/parbackup/test_deployment-* 2> /dev/null || true
+
+  # Host directory of the bind mount, readable without root
+  rm -rf /tmp/parbackup-test-bind
+  mkdir -p /tmp/parbackup-test-bind
+  echo 'bind-data' > /tmp/parbackup-test-bind/hello.txt
+  chmod 640 /tmp/parbackup-test-bind/hello.txt
 
   # Start stack
   docker compose -f "$COMPOSE_FILE" up -d
@@ -239,10 +255,31 @@ setup_file() {
   seed_local_dir
   wait_for_cron
 
+  setup_restic_config
+
   # Create local backup (--local to skip S3)
   BACKUP_OUTPUT="$(cd "$TEST_DIR" && env HOME="$ISOLATED_HOME" "$PARBACKUP" create --local 2>&1)"
   export BACKUP_ARCHIVE
   BACKUP_ARCHIVE="$(echo "$BACKUP_OUTPUT" | grep "Backup complete:" | sed 's/.*Backup complete: //')"
+}
+
+# Config for the restic backend, kept apart from the builtin test config.
+setup_restic_config() {
+  printf 'testsecret\n' > "$RESTIC_SECRET"
+  chmod 600 "$RESTIC_SECRET"
+
+  mkdir -p "${RESTIC_CONFIG_DIR}/.config/par"
+  cat > "${RESTIC_CONFIG_DIR}/.config/par/parbackup.conf" << EOF
+BACKUP_BACKEND="restic"
+S3_ENDPOINT="${TEST_S3_ENDPOINT}"
+S3_BUCKET="${TEST_S3_BUCKET}"
+S3_ACCESS_KEY="${TEST_S3_ACCESS_KEY}"
+S3_SECRET_KEY="${TEST_S3_SECRET_KEY}"
+S3_REGION="${TEST_S3_REGION}"
+RESTIC_SECRET_FILE="${RESTIC_SECRET}"
+RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR}"
+RETENTION_DAYS="7"
+EOF
 }
 
 teardown_file() {
@@ -253,8 +290,12 @@ teardown_file() {
   rm -rf /tmp/parbackup/test_scope* 2> /dev/null || true
   rm -rf /tmp/parbackup/restore-* 2> /dev/null || true
   rm -rf /tmp/parbackup-test-localdir 2> /dev/null || true
+  rm -rf /tmp/parbackup-test-bind 2> /dev/null || true
   rm -rf "${TEST_CONFIG_DIR:-}" 2> /dev/null || true
   rm -rf "${ISOLATED_HOME:-}" 2> /dev/null || true
+  rm -rf "${PARBACKUP_STAGING_ROOT:-}" 2> /dev/null || true
+  rm -rf "${RESTIC_CONFIG_DIR:-}" 2> /dev/null || true
+  rm -rf "${RESTIC_CACHE_DIR:-}" 2> /dev/null || true
 }
 
 #
@@ -1096,6 +1137,34 @@ EOF
   rm -f "$foreign_temp" /tmp/parbackup/test_scope-* /tmp/parbackup/test_scope_assets-*
 }
 
+@test "builtin: RETENTION_WEEKLY and RETENTION_MONTHLY warn and have no effect" {
+  local backupfile="${BATS_TEST_TMPDIR}/Parbackupfile.builtin_weekly"
+  cat > "$backupfile" << 'EOF'
+BACKUP_NAME="test_builtin_weekly"
+BACKUP_BACKEND="builtin"
+RETENTION_DAYS="7"
+RETENTION_WEEKLY="4"
+RETENTION_MONTHLY="12"
+SERVICES="static"
+STATIC_TYPE="dir"
+STATIC_PATH="/tmp/parbackup-test-localdir"
+EOF
+
+  run env HOME="$ISOLATED_HOME" "$PARBACKUP" create --local -f "$backupfile"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RETENTION_WEEKLY has no effect with BACKUP_BACKEND=builtin"* ]]
+  [[ "$output" == *"RETENTION_MONTHLY has no effect with BACKUP_BACKEND=builtin"* ]]
+
+  # The calendar settings change nothing about the archive
+  local archive
+  archive="$(echo "$output" | grep "Backup complete:" | sed 's/.*Backup complete: //')"
+  [ -f "$archive" ]
+  tar -tzf "$archive" | grep -q "Parbackupfile"
+
+  rm -f "$archive"
+  rm -rf /tmp/parbackup/test_builtin_weekly-*
+}
+
 #
 # Test: Error notification emails
 #
@@ -1561,4 +1630,452 @@ EOF
   run_log="$(echo "$output" | grep "Run log:" | sed 's/.*Run log: //')"
   rm -f "$run_log"
   rm -rf /tmp/parbackup/runlog_email_test-* 2> /dev/null || true
+}
+
+#
+# Test: restic backend
+#
+
+require_restic() {
+  if ! command -v restic > /dev/null; then
+    skip "restic is not installed, run 'mise install'"
+  fi
+}
+
+# Run parbackup with the restic test config.
+restic_parbackup() {
+  env HOME="$RESTIC_CONFIG_DIR" PARBACKUP_STAGING_ROOT="$PARBACKUP_STAGING_ROOT" "$PARBACKUP" "$@"
+}
+
+# Run restic itself against the repository of the given backup name.
+restic_cli() {
+  local name="$1"
+  shift
+
+  env \
+    AWS_ACCESS_KEY_ID="$TEST_S3_ACCESS_KEY" \
+    AWS_SECRET_ACCESS_KEY="$TEST_S3_SECRET_KEY" \
+    AWS_DEFAULT_REGION="$TEST_S3_REGION" \
+    RESTIC_REPOSITORY="s3:${TEST_S3_ENDPOINT}/${TEST_S3_BUCKET}/restic/${name}" \
+    RESTIC_PASSWORD="$(cat "$RESTIC_SECRET")" \
+    RESTIC_CACHE_DIR="$RESTIC_CACHE_DIR" \
+    restic "$@"
+}
+
+restic_snapshot_count() {
+  restic_parbackup ls --timestamps 2> /dev/null | grep -c "/" || true
+}
+
+restic_repo_size() {
+  restic_cli "$1" stats --mode raw-data --json 2> /dev/null \
+    | grep -o '"total_size":[0-9]*' | cut -d: -f2
+}
+
+# Oldest snapshot of a deployment, the one the download test restores.
+oldest_snapshot_ref() {
+  restic_parbackup ls --timestamps 2> /dev/null \
+    | grep "$1/" | head -1 | cut -f2
+}
+
+# Newest snapshot of a deployment, the one a fresh create left behind.
+newest_snapshot_ref() {
+  restic_parbackup ls --timestamps 2> /dev/null \
+    | grep "$1/" | tail -1 | cut -f2
+}
+
+write_restic_scope_parbackupfile() {
+  local path="$1"
+  local name="$2"
+  local retention="${3:-1}"
+
+  {
+    echo "BACKUP_NAME=\"${name}\""
+    echo "BACKUP_BACKEND=\"restic\""
+    echo "RETENTION_DAYS=\"${retention}\""
+    echo 'SERVICES="static"'
+    echo 'STATIC_TYPE="dir"'
+    echo 'STATIC_PATH="/tmp/parbackup-test-localdir"'
+  } > "$path"
+}
+
+@test "restic: create stores dumps, volume data and the Parbackupfile in one snapshot" {
+  require_restic
+
+  run restic_parbackup create -f "$TEST_DIR/Parbackupfile"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Backup complete: restic snapshot"* ]]
+  [[ "$output" == *"Reading '/tmp/parbackup-test-localdir' in place"* ]]
+
+  # An unprivileged run cannot read /var/lib/docker, it falls back to docker cp
+  if [[ "$(id -u)" -ne 0 ]]; then
+    [[ "$output" == *"'app_uploads' is not a volume mount, falling back to docker cp"* ]]
+  fi
+
+  local snapshot_ref snapshot_id
+  snapshot_ref="$(oldest_snapshot_ref test_deployment)"
+  [ -n "$snapshot_ref" ]
+  snapshot_id="${snapshot_ref#*/}"
+
+  local listing
+  listing="$(restic_cli test_deployment ls "$snapshot_id" 2> /dev/null)"
+  echo "$listing" | grep -q "${PARBACKUP_STAGING_ROOT}/test_deployment/Parbackupfile"
+  echo "$listing" | grep -q "${PARBACKUP_STAGING_ROOT}/test_deployment/app_db/dump.sql"
+  echo "$listing" | grep -q "${PARBACKUP_STAGING_ROOT}/test_deployment/app_mongo/dump.archive"
+  echo "$listing" | grep -qE "(app_uploads/volume\.tar|parbackup-test_uploads/_data/images/logo\.png)"
+  echo "$listing" | grep -q "/tmp/parbackup-test-localdir/css/style.css"
+  echo "$listing" | grep -q "${PARBACKUP_STAGING_ROOT}/test_deployment/parbackup.manifest"
+}
+
+@test "restic: volume behind a bind mount is read in place and restored" {
+  require_restic
+
+  local backupfile="${BATS_TEST_TMPDIR}/Parbackupfile.restic_bind"
+  cat > "$backupfile" << 'EOF'
+BACKUP_NAME="test_restic_bind"
+SERVICES="bind"
+BIND_TYPE="volume"
+BIND_CONTAINER="parbackup-test-uploads"
+BIND_PATH="/app/public/uploads-bind"
+EOF
+
+  run restic_parbackup create -f "$backupfile"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Reading '/tmp/parbackup-test-bind' in place"* ]]
+
+  local snapshot_id
+  snapshot_id="$(restic_cli test_restic_bind snapshots --json 2> /dev/null | grep -o '"short_id":"[a-f0-9]*"' | head -1 | cut -d'"' -f4)"
+  [ -n "$snapshot_id" ]
+
+  local listing
+  listing="$(restic_cli test_restic_bind ls "$snapshot_id" 2> /dev/null)"
+  echo "$listing" | grep -q "/tmp/parbackup-test-bind/hello.txt"
+  echo "$listing" | grep -q "${PARBACKUP_STAGING_ROOT}/test_restic_bind/parbackup.manifest"
+
+  rm -f /tmp/parbackup-test-bind/hello.txt
+  echo 'TAMPERED' > /tmp/parbackup-test-bind/evil.txt
+
+  run restic_parbackup restore --force "$(oldest_snapshot_ref test_restic_bind)"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Restore complete"* ]]
+
+  run cat /tmp/parbackup-test-bind/hello.txt
+  [[ "$output" == *"bind-data"* ]]
+  [ ! -f /tmp/parbackup-test-bind/evil.txt ]
+
+  run stat -c '%a' /tmp/parbackup-test-bind/hello.txt
+  [ "$output" = "640" ]
+}
+
+@test "restic: deduplication keeps unchanged data out of the repository" {
+  require_restic
+
+  # A large unchanged file makes the delta of the next snapshot measurable
+  docker exec parbackup-test-uploads sh -c "dd if=/dev/urandom of=/app/public/uploads/big.bin bs=1M count=8 2> /dev/null"
+
+  run restic_parbackup create -f "$TEST_DIR/Parbackupfile"
+  [ "$status" -eq 0 ]
+
+  local size_first
+  size_first="$(restic_repo_size test_deployment)"
+  [ -n "$size_first" ]
+
+  run restic_parbackup create -f "$TEST_DIR/Parbackupfile"
+  [ "$status" -eq 0 ]
+
+  local size_second growth
+  size_second="$(restic_repo_size test_deployment)"
+  [ -n "$size_second" ]
+  growth=$((size_second - size_first))
+  growth="${growth#-}"
+
+  # 8 MiB of unchanged data must not be stored twice
+  [ "$growth" -lt 1000000 ]
+
+  docker exec parbackup-test-uploads rm -f /app/public/uploads/big.bin
+}
+
+@test "restic: round-trip from the repository preserves data and file modes" {
+  require_restic
+
+  # Backup and restore in one test, like the builtin round-trip
+  run restic_parbackup create -f "$TEST_DIR/Parbackupfile"
+  [ "$status" -eq 0 ]
+
+  local snapshot_ref
+  snapshot_ref="$(newest_snapshot_ref test_deployment)"
+  [ -n "$snapshot_ref" ]
+
+  pg_query "DELETE FROM users; INSERT INTO users (name, email) VALUES ('RESTIC_INTRUDER', 'hacked@evil.com');" > /dev/null
+  mongo_query "db.getSiblingDB('testdb').products.deleteMany({}); db.getSiblingDB('testdb').products.insertOne({name:'RESTIC_FAKE',price:0,stock:0});" > /dev/null
+  docker exec parbackup-test-uploads sh -c "rm -rf /app/public/uploads/* && echo 'TAMPERED' > /app/public/uploads/evil.txt"
+  rm -rf /tmp/parbackup-test-localdir/*
+  echo 'TAMPERED' > /tmp/parbackup-test-localdir/evil.html
+
+  run restic_parbackup restore --force "$snapshot_ref"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Restore complete"* ]]
+
+  local pg_result
+  pg_result="$(pg_query "SELECT name FROM users ORDER BY id;")"
+  [[ "$pg_result" == *"Alice Mueller"* ]]
+  [[ "$pg_result" != *"RESTIC_INTRUDER"* ]]
+  [ "$(pg_query "SELECT count(*) FROM users;")" -eq 3 ]
+
+  local mongo_result
+  mongo_result="$(mongo_query "db.getSiblingDB('testdb').products.find({},{name:1,_id:0}).sort({name:1}).toArray().map(d=>d.name).join('\n')")"
+  [[ "$mongo_result" == *"Widget A"* ]]
+  [[ "$mongo_result" != *"RESTIC_FAKE"* ]]
+
+  local uploads_result
+  uploads_result="$(docker exec parbackup-test-uploads ls -R /app/public/uploads/)"
+  [[ "$uploads_result" == *"logo.png"* ]]
+  [[ "$uploads_result" == *"readme.txt"* ]]
+  [[ "$uploads_result" != *"evil.txt"* ]]
+
+  [ -f "/tmp/parbackup-test-localdir/css/style.css" ]
+  [ ! -f "/tmp/parbackup-test-localdir/evil.html" ]
+
+  # Mode preservation across the snapshot is covered by the bind mount test
+  run docker exec parbackup-test-uploads stat -c '%n' /app/public/uploads/readme.txt
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"readme.txt"* ]]
+}
+
+@test "restic: ls lists snapshots as <backup_name>/<id>" {
+  require_restic
+
+  run restic_parbackup ls
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test_deployment/"* ]]
+
+  run restic_parbackup ls test_deployment/
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test_deployment/"* ]]
+  [[ "$output" != *"test_restic_scope/"* ]]
+
+  local timestamps
+  timestamps="$(restic_parbackup ls --timestamps 2> /dev/null | grep "test_deployment/" | head -1)"
+  [ -n "$timestamps" ]
+  [[ "$timestamps" =~ ^[0-9]+$'\t'test_deployment/[0-9a-f]+$ ]]
+}
+
+@test "restic: download restores a snapshot into a directory" {
+  require_restic
+
+  local snapshot_ref target
+  snapshot_ref="$(oldest_snapshot_ref test_deployment)"
+  [ -n "$snapshot_ref" ]
+
+  target="$(restic_parbackup download --force "$snapshot_ref" 2> /dev/null)"
+  [ -n "$target" ]
+  [ -d "$target" ]
+  [ -f "${target}${PARBACKUP_STAGING_ROOT}/test_deployment/Parbackupfile" ]
+
+  rm -rf "$target"
+}
+
+@test "restic: check and prune run against the repository" {
+  require_restic
+
+  # The test also runs on its own, so the repository has to exist first
+  run restic_parbackup create -f "$TEST_DIR/Parbackupfile"
+  [ "$status" -eq 0 ]
+
+  run restic_parbackup restic check -f "$TEST_DIR/Parbackupfile"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no errors were found"* ]]
+
+  run restic_parbackup restic prune -f "$TEST_DIR/Parbackupfile" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unused size after prune"* ]]
+}
+
+@test "restic: retention forgets snapshots beyond keep-daily" {
+  require_restic
+
+  local scoped="${BATS_TEST_TMPDIR}/Parbackupfile.restic_scope"
+  write_restic_scope_parbackupfile "$scoped" "test_restic_scope" "1"
+
+  run restic_parbackup create -f "$scoped"
+  [ "$status" -eq 0 ]
+  run restic_parbackup create -f "$scoped"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Forgetting snapshots beyond retention"* ]]
+
+  run restic_parbackup ls --timestamps
+  [ "$status" -eq 0 ]
+  [ "$(echo "$output" | grep -c "test_restic_scope/")" -eq 1 ]
+
+  run restic_parbackup cleanup -f "$scoped" --dry-run
+  [ "$status" -eq 0 ]
+}
+
+@test "restic: --no-prune forgets without pruning" {
+  require_restic
+
+  local scoped="${BATS_TEST_TMPDIR}/Parbackupfile.restic_noprune"
+  write_restic_scope_parbackupfile "$scoped" "test_restic_noprune" "1"
+
+  run restic_parbackup create -f "$scoped"
+  [ "$status" -eq 0 ]
+
+  run restic_parbackup create -f "$scoped" --no-prune
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"prune is disabled"* ]]
+}
+
+@test "restic: volume path outside a mount falls back to docker cp" {
+  require_restic
+
+  local backupfile="${BATS_TEST_TMPDIR}/Parbackupfile.restic_fallback"
+  cat > "$backupfile" << 'EOF'
+BACKUP_NAME="test_restic_fallback"
+SERVICES="etc"
+ETC_TYPE="volume"
+ETC_CONTAINER="parbackup-test-uploads"
+ETC_PATH="/etc"
+EOF
+
+  run restic_parbackup create -f "$backupfile"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"falling back to docker cp"* ]]
+
+  local listing
+  listing="$(restic_cli test_restic_fallback ls "$(restic_cli test_restic_fallback snapshots --json 2> /dev/null | grep -o '"short_id":"[a-f0-9]*"' | head -1 | cut -d'"' -f4)" 2> /dev/null)"
+  echo "$listing" | grep -q "${PARBACKUP_STAGING_ROOT}/test_restic_fallback/etc/volume.tar"
+}
+
+@test "restic: missing secret file fails with a clear message" {
+  require_restic
+
+  local cfg_dir
+  cfg_dir="$(mktemp -d /tmp/parbackup-test-restic-nosecret-XXXXXX)"
+  mkdir -p "${cfg_dir}/.config/par"
+  cat > "${cfg_dir}/.config/par/parbackup.conf" << EOF
+BACKUP_BACKEND="restic"
+S3_ENDPOINT="${TEST_S3_ENDPOINT}"
+S3_BUCKET="${TEST_S3_BUCKET}"
+S3_ACCESS_KEY="${TEST_S3_ACCESS_KEY}"
+S3_SECRET_KEY="${TEST_S3_SECRET_KEY}"
+S3_REGION="${TEST_S3_REGION}"
+RESTIC_SECRET_FILE="${cfg_dir}/missing-secret"
+RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR}"
+EOF
+
+  run env HOME="$cfg_dir" PARBACKUP_STAGING_ROOT="$PARBACKUP_STAGING_ROOT" \
+    "$PARBACKUP" create -f "$TEST_DIR/Parbackupfile"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"Missing restic secret file"* ]]
+
+  rm -rf "$cfg_dir"
+}
+
+@test "restic: RESTIC_REPO_PREFIX moves the repositories inside the bucket" {
+  require_restic
+
+  local cfg_dir backupfile
+  cfg_dir="$(mktemp -d /tmp/parbackup-test-restic-prefix-XXXXXX)"
+  mkdir -p "${cfg_dir}/.config/par"
+  cat > "${cfg_dir}/.config/par/parbackup.conf" << EOF
+BACKUP_BACKEND="restic"
+S3_ENDPOINT="${TEST_S3_ENDPOINT}"
+S3_BUCKET="${TEST_S3_BUCKET}"
+S3_ACCESS_KEY="${TEST_S3_ACCESS_KEY}"
+S3_SECRET_KEY="${TEST_S3_SECRET_KEY}"
+S3_REGION="${TEST_S3_REGION}"
+RESTIC_REPO_PREFIX="custom-prefix"
+RESTIC_SECRET_FILE="${RESTIC_SECRET}"
+RESTIC_CACHE_DIR="${RESTIC_CACHE_DIR}"
+RETENTION_DAYS="7"
+EOF
+
+  backupfile="${BATS_TEST_TMPDIR}/Parbackupfile.repo_prefix"
+  cat > "$backupfile" << 'EOF'
+BACKUP_NAME="test_repo_prefix"
+SERVICES="static"
+STATIC_TYPE="dir"
+STATIC_PATH="/tmp/parbackup-test-localdir"
+EOF
+
+  run env HOME="$cfg_dir" PARBACKUP_STAGING_ROOT="$PARBACKUP_STAGING_ROOT" \
+    "$PARBACKUP" create -f "$backupfile"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"s3:${TEST_S3_ENDPOINT}/${TEST_S3_BUCKET}/custom-prefix/test_repo_prefix"* ]]
+
+  run env HOME="$cfg_dir" PARBACKUP_STAGING_ROOT="$PARBACKUP_STAGING_ROOT" "$PARBACKUP" ls
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test_repo_prefix/"* ]]
+
+  rm -rf "$cfg_dir"
+}
+
+@test "restic: init refuses a Parbackupfile with the builtin backend" {
+  require_restic
+
+  local backupfile="${BATS_TEST_TMPDIR}/Parbackupfile.init_builtin"
+  cat > "$backupfile" << 'EOF'
+BACKUP_NAME="test_init_builtin"
+BACKUP_BACKEND="builtin"
+SERVICES="static"
+STATIC_TYPE="dir"
+STATIC_PATH="/tmp/parbackup-test-localdir"
+EOF
+
+  run restic_parbackup restic init -f "$backupfile"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"BACKUP_BACKEND is 'builtin', there is no restic repository to initialize"* ]]
+}
+
+@test "restic: prune and check skip a builtin Parbackupfile without a repository" {
+  require_restic
+
+  local backupfile="${BATS_TEST_TMPDIR}/Parbackupfile.prune_builtin"
+  cat > "$backupfile" << 'EOF'
+BACKUP_NAME="test_prune_builtin"
+BACKUP_BACKEND="builtin"
+SERVICES="static"
+STATIC_TYPE="dir"
+STATIC_PATH="/tmp/parbackup-test-localdir"
+EOF
+
+  run restic_parbackup restic prune -f "$backupfile" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Loading $backupfile"* ]]
+  [[ "$output" == *"No restic repository at"* ]]
+  [[ "$output" == *"test_prune_builtin"* ]]
+
+  run restic_parbackup restic check -f "$backupfile"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No restic repository at"* ]]
+}
+
+@test "restic: cleanup --backend builtin removes old archives" {
+  require_restic
+
+  local backupfile="${BATS_TEST_TMPDIR}/Parbackupfile.migration"
+  cat > "$backupfile" << 'EOF'
+BACKUP_NAME="test_migration"
+RETENTION_DAYS="7"
+SERVICES="static"
+STATIC_TYPE="dir"
+STATIC_PATH="/tmp/parbackup-test-localdir"
+EOF
+
+  # Upload with the builtin config, clean up with the restic config and --backend
+  run env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" create -f "$backupfile"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"S3 upload complete"* ]]
+
+  local future_now
+  future_now=$(($(date +%s) + 30 * 86400))
+
+  run env HOME="$RESTIC_CONFIG_DIR" PARBACKUP_STAGING_ROOT="$PARBACKUP_STAGING_ROOT" _NOW="$future_now" \
+    "$PARBACKUP" cleanup --backend builtin -f "$backupfile" --dry-run
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Would delete: test_migration/"* ]]
+
+  run env HOME="$RESTIC_CONFIG_DIR" PARBACKUP_STAGING_ROOT="$PARBACKUP_STAGING_ROOT" _NOW="$future_now" \
+    "$PARBACKUP" cleanup --backend builtin -f "$backupfile"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Deleted 1 old remote backup"* ]]
 }

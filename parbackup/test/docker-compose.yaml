@@ -76,6 +76,8 @@ services:
     command: tail -f /dev/null
     volumes:
       - uploads:/app/public/uploads
+      # A bind mount is readable without root, it tests reading volumes in place
+      - /tmp/parbackup-test-bind:/app/public/uploads-bind
 
   # Lightweight SMTP server for testing error notification emails.
   # Requires SMTP authentication (verifies credentials are passed correctly).

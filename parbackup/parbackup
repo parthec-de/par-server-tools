@@ -17,6 +17,34 @@ install_gum() {
   install_pkg "gum"
 }
 
+_restic_version_checked=false
+
+install_restic() {
+  if ! command -v restic > /dev/null; then
+    info "Installing restic..."
+    install_pkg "restic"
+  fi
+
+  if [[ "$_restic_version_checked" == false ]]; then
+    _warn_old_restic
+    _restic_version_checked=true
+  fi
+}
+
+# Compression is on by default since 0.16, older releases also prune much slower.
+_warn_old_restic() {
+  local version major minor
+  version="$(restic version 2> /dev/null | awk '{print $2}')"
+  major="${version%%.*}"
+  minor="${version#*.}"
+  minor="${minor%%.*}"
+
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 0
+  if ((major == 0 && minor < 16)); then
+    warn "restic $version is older than 0.16. Install a newer one for compression by default and a faster prune."
+  fi
+}
+
 script_name="parbackup"
 script_version="1.8.0"
 script_invocation="$0 $*"
@@ -25,6 +53,19 @@ config_dir="${HOME}/.config/par"
 config_file="${config_dir}/parbackup.conf"
 working_dir="/tmp/parbackup"
 run_log_dir="${working_dir}/runs"
+
+# The staging tree of the restic backend keeps a fixed path per BACKUP_NAME so
+# restic finds the parent snapshot and skips unchanged files.
+restic_staging_root="${PARBACKUP_STAGING_ROOT:-/var/cache/parbackup/staging}"
+
+# set by require_parbackupfile
+BACKUP_RETENTION_DAYS=""
+BACKUP_RETENTION_WEEKLY=""
+BACKUP_RETENTION_MONTHLY=""
+BACKUP_BACKEND_OVERRIDE=""
+
+# set by cleanup --backend
+BACKEND_OVERRIDE=""
 
 ensure_working_dir() {
   mkdir -p "$working_dir"
@@ -107,13 +148,14 @@ $script_name v$script_version -- backup manager for Docker deployments
 Usage: parbackup <command> [options]
 
 Commands:
-  create      Create a backup and upload to S3
-  download    Download a backup from S3
-  restore     Restore a backup from archive or directory
-  ls          List available backups on S3
-  cleanup     Delete backups older than retention period
+  create      Create a backup and upload it to the configured backend
+  download    Download a backup from the backend
+  restore     Restore a backup from the backend, an archive or a directory
+  ls          List available backups
+  cleanup     Forget backups beyond the retention period
+  restic      Manage the restic repositories (init, prune, check)
   cron        Manage cron schedule for automated backups
-  config      Show or set configuration (S3)
+  config      Show or set configuration
   help        Show this help message
 
 Options:
@@ -121,18 +163,31 @@ Options:
 
 Command-specific options:
   create:
-    --local            Skip S3 upload (no config needed)
-    --keep-local       Keep the local archive after the S3 upload
+    --local            Build the staging tree only, no upload (no config needed)
+    --keep-local       Keep the staging tree after a successful upload
+    --no-prune         restic: forget snapshots without pruning, frees space later
     -f, --file <path>  Path to Parbackupfile (default: ./Parbackupfile)
 
   ls:
     [prefix]           Optional prefix to filter backups (e.g. project name)
-    --tree             Display results as a directory tree
+    --tree             Display results as a directory tree (builtin only)
     --timestamps       List backups as <epoch>\t<key> per line
 
   cleanup:
     --dry-run          Show which backups would be deleted, without deleting
+    --backend <name>   builtin or restic, overrides the configuration
     -f, --file <path>  Only clean up backups of this Parbackupfile, using its RETENTION_DAYS
+
+  restic init:
+    -f, --file <path>  Parbackupfile whose repository to create
+
+  restic prune:
+    --dry-run          Show what prune would free, without rewriting packs
+    -f, --file <path>  Only prune the repository of this Parbackupfile
+
+  restic check:
+    --read-data-subset <value>  Read a share of the packs, e.g. 1/7 or 5%
+    -f, --file <path>  Only check the repository of this Parbackupfile
 
   cron:
     -f, --file <path>  Path to Parbackupfile (required for add/remove)
@@ -140,33 +195,49 @@ Command-specific options:
     remove             Remove cron entry for the given Parbackupfile
 
   download:
-    <backup_ref>       S3 key of the backup to download
-    --pick             Interactively choose a backup from S3 to download
-    -f, --force        Overwrite existing local file without prompting
+    <backup_ref>       Key of the backup to download
+    --pick             Interactively choose a backup to download
+    -f, --force        Overwrite existing local data without prompting
 
   restore:
-    <backup_ref>       S3 key of the backup (default), or local path with --local
-    --pick             Interactively choose a backup from S3 to restore
-    --local            Restore from local .tar.gz or directory instead of S3
+    <backup_ref>       Key of the backup (default), or local path with --local
+    --pick             Interactively choose a backup to restore
+    --local            Restore from a local .tar.gz or directory instead of the backend
     -f, --force        Skip confirmation prompt
 
   config:
-    set                Interactively configure S3 backend
+    set                Interactively configure S3 and the backend
+    set s3             Interactively configure S3 only
+    set restic         Interactively configure the restic backend
+
+The builtin backend packs one .tar.gz per run and ages the archives out. The
+restic backend stores deduplicated, encrypted snapshots and forgets them with
+--keep-daily/--keep-weekly/--keep-monthly. BACKUP_BACKEND selects the default,
+a Parbackupfile overrides it.
 
 Examples:
   parbackup config set
+  parbackup config set restic
   parbackup config
   parbackup create
   parbackup create --local
+  parbackup create --no-prune
   parbackup create -f /opt/my-project/Parbackupfile
   parbackup download --pick
   parbackup download my_project/my_project-2026-02-27_14-30-22.tar.gz
+  parbackup download my_project/1a2b3c4d
   parbackup restore --pick
   parbackup restore my_project/my_project-2026-02-27_14-30-22.tar.gz
+  parbackup restore my_project/1a2b3c4d
   parbackup restore --local /tmp/parbackup/my_project-2026-02-27_14-30-22.tar.gz
   parbackup restore --local --force /tmp/parbackup/my_project-2026-02-27_14-30-22.tar.gz
   parbackup ls
   parbackup ls my_project/
+  parbackup cleanup -f /opt/my-project/Parbackupfile
+  parbackup cleanup --dry-run --backend builtin
+  parbackup restic init -f /opt/my-project/Parbackupfile
+  parbackup restic prune -f /opt/my-project/Parbackupfile
+  parbackup restic check -f /opt/my-project/Parbackupfile --read-data-subset 1/7
   parbackup cron -f /opt/my-project/Parbackupfile
   parbackup cron show
   parbackup cron remove -f /opt/my-project/Parbackupfile
@@ -185,23 +256,29 @@ require_parbackupfile() {
 
   info "Loading $backupfile..."
 
-  # RETENTION_DAYS may come from both the config and the Parbackupfile. Keep the
-  # Parbackupfile value in BACKUP_RETENTION_DAYS and leave the config value intact.
-  local config_retention_set=false config_retention=""
-  if [[ -v RETENTION_DAYS ]]; then
-    config_retention_set=true
-    config_retention="$RETENTION_DAYS"
-  fi
-  unset RETENTION_DAYS
+  # The Parbackupfile may override settings that also live in the config. Keep the
+  # config values and expose the file values as BACKUP_*.
+  local -A config_values=()
+  local var
+  for var in RETENTION_DAYS RETENTION_WEEKLY RETENTION_MONTHLY BACKUP_BACKEND; do
+    if [[ -v "$var" ]]; then
+      config_values["$var"]="${!var}"
+    fi
+    unset "$var"
+  done
 
   # shellcheck source=/dev/null
   source "$backupfile"
 
   BACKUP_RETENTION_DAYS="${RETENTION_DAYS:-}"
-  unset RETENTION_DAYS
-  if [[ "$config_retention_set" == true ]]; then
-    RETENTION_DAYS="$config_retention"
-  fi
+  BACKUP_RETENTION_WEEKLY="${RETENTION_WEEKLY:-}"
+  BACKUP_RETENTION_MONTHLY="${RETENTION_MONTHLY:-}"
+  BACKUP_BACKEND_OVERRIDE="${BACKUP_BACKEND:-}"
+  unset RETENTION_DAYS RETENTION_WEEKLY RETENTION_MONTHLY BACKUP_BACKEND
+
+  for var in "${!config_values[@]}"; do
+    printf -v "$var" '%s' "${config_values[$var]}"
+  done
 
   # Validate required top-level variables
   if [[ -z "${BACKUP_NAME:-}" ]]; then
@@ -210,6 +287,42 @@ require_parbackupfile() {
   if [[ -z "${SERVICES:-}" ]]; then
     fail "SERVICES is not set in $backupfile"
   fi
+}
+
+# Effective backend, the Parbackupfile overrides the configuration.
+backend() {
+  local selected="${BACKEND_OVERRIDE:-${BACKUP_BACKEND_OVERRIDE:-${BACKUP_BACKEND:-builtin}}}"
+  case "$selected" in
+    builtin | restic)
+      echo "$selected"
+      ;;
+    *)
+      fail "Unknown BACKUP_BACKEND '$selected', expected 'builtin' or 'restic'"
+      ;;
+  esac
+}
+
+effective_retention_days() {
+  echo "${BACKUP_RETENTION_DAYS:-${RETENTION_DAYS:-0}}"
+}
+
+effective_retention_weekly() {
+  echo "${BACKUP_RETENTION_WEEKLY:-${RETENTION_WEEKLY:-}}"
+}
+
+effective_retention_monthly() {
+  echo "${BACKUP_RETENTION_MONTHLY:-${RETENTION_MONTHLY:-}}"
+}
+
+# Calendar retention exists for restic only, the builtin backend ages archives out.
+warn_unused_retention() {
+  [[ "$(backend)" == builtin ]] || return 0
+
+  [[ -n "$(effective_retention_weekly)" ]] \
+    && warn "RETENTION_WEEKLY has no effect with BACKUP_BACKEND=builtin"
+  [[ -n "$(effective_retention_monthly)" ]] \
+    && warn "RETENTION_MONTHLY has no effect with BACKUP_BACKEND=builtin"
+  return 0
 }
 
 # Resolve a per-service variable. Usage: get_svc_var <service_name> <var_suffix>
@@ -324,6 +437,231 @@ s3_list() {
   local prefix="${1:-}"
 
   s3_cmd ls "s3://${S3_BUCKET}/${prefix}" 2> >(_tee_to_log "s3 ls")
+}
+
+# --- restic backend ---
+
+restic_secret_file() {
+  echo "${RESTIC_SECRET_FILE:-${config_dir}/restic-secret}"
+}
+
+restic_cache_dir() {
+  echo "${RESTIC_CACHE_DIR:-/var/cache/parbackup/restic}"
+}
+
+require_restic_config() {
+  local secret
+  secret="$(restic_secret_file)"
+
+  # A password from the environment wins, it keeps the tests free of secret files.
+  if [[ -n "${RESTIC_PASSWORD:-}" ]]; then
+    return 0
+  fi
+
+  if [[ ! -f "$secret" ]]; then
+    fail "Missing restic secret file: $secret. Create it with 'parbackup config set restic'."
+  fi
+
+  local mode
+  mode="$(stat -c '%a' "$secret")"
+  if [[ "$mode" != "600" && "$mode" != "400" ]]; then
+    fail "Secret file $secret has mode $mode, expected 600"
+  fi
+}
+
+# Prefix in the bucket that holds one repository per Parbackupfile. An empty
+# prefix puts the repositories directly below the bucket.
+restic_repo_prefix() {
+  local prefix="${RESTIC_REPO_PREFIX:-restic}"
+  prefix="${prefix#/}"
+  prefix="${prefix%/}"
+  echo "$prefix"
+}
+
+# Each Parbackupfile gets its own repository, so retention and prune stay scoped
+# to one deployment.
+restic_repository_for() {
+  local backup_name="$1"
+  local prefix
+  prefix="$(restic_repo_prefix)"
+
+  if [[ -n "$prefix" ]]; then
+    echo "s3:${S3_ENDPOINT}/${S3_BUCKET}/${prefix}/${backup_name}"
+  else
+    echo "s3:${S3_ENDPOINT}/${S3_BUCKET}/${backup_name}"
+  fi
+}
+
+restic_cmd() {
+  local repository="$1"
+  shift
+
+  install_restic
+
+  # The repository always lives in the configured S3 bucket, so it always takes
+  # the credentials from the parbackup config.
+  local -a env_args=(
+    "RESTIC_REPOSITORY=${repository}"
+    "RESTIC_CACHE_DIR=$(restic_cache_dir)"
+    "AWS_ACCESS_KEY_ID=${S3_ACCESS_KEY:-}"
+    "AWS_SECRET_ACCESS_KEY=${S3_SECRET_KEY:-}"
+  )
+  [[ -n "${S3_REGION:-}" ]] && env_args+=("AWS_DEFAULT_REGION=${S3_REGION}")
+
+  if [[ -n "${RESTIC_PASSWORD:-}" ]]; then
+    env_args+=("RESTIC_PASSWORD=${RESTIC_PASSWORD}")
+  else
+    env_args+=("RESTIC_PASSWORD_FILE=$(restic_secret_file)")
+  fi
+
+  env "${env_args[@]}" restic "$@"
+}
+
+restic_repo_exists() {
+  restic_cmd "$1" cat config > /dev/null 2>&1
+}
+
+restic_init_repository() {
+  local repository="$1"
+
+  if restic_repo_exists "$repository"; then
+    return 0
+  fi
+
+  info "Initializing restic repository $repository"
+  restic_cmd "$repository" init 2>&1 | _tee_to_log "restic init"
+}
+
+# Print the repository names below the prefix.
+restic_repo_names() {
+  local prefix s3_path
+  prefix="$(restic_repo_prefix)"
+  s3_path="s3://${S3_BUCKET}${prefix:+/$prefix}"
+
+  { s3_cmd ls "${s3_path}/" 2> >(_tee_to_log "s3 ls") || true; } \
+    | while IFS= read -r line; do
+        local entry="${line##* }"
+        entry="${entry#"${s3_path}/"}"
+        entry="${entry%/}"
+        [[ -n "$entry" && "$entry" != */* ]] && echo "$entry"
+    done
+}
+
+# Print "<epoch>\t<short_id>" per snapshot of a repository.
+restic_snapshot_rows() {
+  local repository="$1"
+
+  { restic_cmd "$repository" snapshots 2> >(_tee_to_log "restic snapshots") || true; } \
+    | awk '$1 ~ /^[0-9a-f]+$/ && $2 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]$/ { print $2 " " $3 "\t" $1 }' \
+    | while IFS=$'\t' read -r snapshot_time snapshot_id; do
+        local epoch
+        epoch="$(date -d "$snapshot_time" +%s 2> /dev/null || true)"
+        [[ -n "$epoch" ]] && printf '%s\t%s\n' "$epoch" "$snapshot_id"
+    done
+}
+
+# Print "<epoch>\t<backup_name>/<short_id>" for every snapshot below the prefix.
+restic_all_snapshot_rows() {
+  local name
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    restic_snapshot_rows "$(restic_repository_for "$name")" \
+      | awk -F'\t' -v name="$name" '{ print $1 "\t" name "/" $2 }'
+  done < <(restic_repo_names | sort)
+}
+
+# Turn "<epoch>\t<reference>" from stdin into "<YYYY-mm-dd HH:MM>\t<reference>".
+format_snapshot_refs() {
+  while IFS=$'\t' read -r epoch reference; do
+    [[ -z "$epoch" ]] && continue
+    printf '%s\t%s\n' "$(date -d "@${epoch}" '+%Y-%m-%d %H:%M')" "$reference"
+  done
+}
+
+# Split "<backup_name>/<snapshot_id>" into RESTORE_REPO_NAME and RESTORE_SNAPSHOT.
+parse_snapshot_ref() {
+  local ref="$1"
+
+  if [[ "$ref" != */* ]]; then
+    fail "Expected <backup_name>/<snapshot_id>, got '$ref'"
+  fi
+
+  RESTORE_REPO_NAME="${ref%%/*}"
+  RESTORE_SNAPSHOT="${ref#*/}"
+
+  if [[ -z "$RESTORE_REPO_NAME" || -z "$RESTORE_SNAPSHOT" ]]; then
+    fail "Expected <backup_name>/<snapshot_id>, got '$ref'"
+  fi
+}
+
+# Restore a snapshot below a new target directory. Prints the restored staging dir.
+restic_restore_snapshot() {
+  local repository="$1"
+  local snapshot="$2"
+  local target="$3"
+  local backup_name="$4"
+
+  info "Restoring snapshot $snapshot from $repository"
+
+  restic_cmd "$repository" restore "$snapshot" --target "$target" \
+    2>&1 | _tee_to_log "restic restore"
+
+  echo "${target}${restic_staging_root}/${backup_name}"
+}
+
+# Resolve the host directory behind a container path.
+# Prints the path and returns 0, or prints nothing and returns 1.
+resolve_host_path() {
+  local svc_name="$1"
+  local container path
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  path="$(require_svc_var "$svc_name" "PATH")"
+  path="${path%/}"
+
+  local mounts
+  if ! mounts="$(docker inspect --format '{{range .Mounts}}{{.Destination}}|{{.Source}}{{"\n"}}{{end}}' "$container" 2> /dev/null)"; then
+    return 1
+  fi
+
+  local destination source match="" match_length=0 best_source=""
+  while IFS='|' read -r destination source; do
+    [[ -z "$destination" || -z "$source" ]] && continue
+    destination="${destination%/}"
+
+    # The container path may sit below the mount point, e.g. uploads in /app.
+    if [[ "$path" == "$destination" || "$path" == "$destination"/* ]]; then
+      if ((${#destination} > match_length)); then
+        match="$destination"
+        match_length="${#destination}"
+        best_source="$source"
+      fi
+    fi
+  done <<< "$mounts"
+
+  [[ -z "$match" ]] && return 1
+
+  local host_path="${best_source%/}${path#"$match"}"
+  [[ -d "$host_path" ]] || return 1
+
+  echo "$host_path"
+}
+
+record_manifest_entry() {
+  local staging="$1"
+  local svc_name="$2"
+  local svc_type="$3"
+  local host_path="$4"
+
+  printf '%s\t%s\t%s\n' "$svc_name" "$svc_type" "$host_path" >> "${staging}/parbackup.manifest"
+}
+
+manifest_host_path() {
+  local backup_dir="$1"
+  local svc_name="$2"
+  local manifest="${backup_dir}/parbackup.manifest"
+
+  [[ -f "$manifest" ]] || return 1
+  awk -F'\t' -v svc="$svc_name" '$1 == svc { print $3; exit }' "$manifest"
 }
 
 # --- Backup/Restore helpers ---
@@ -555,6 +893,32 @@ restore_volume() {
   info "  Volume restore complete for '$path'"
 }
 
+# Restore volume files from a directory, e.g. the tree of a restic snapshot.
+restore_volume_from_dir() {
+  local svc_name="$1"
+  local source_dir="$2"
+
+  local container path
+  container="$(require_svc_var "$svc_name" "CONTAINER")"
+  path="$(require_svc_var "$svc_name" "PATH")"
+
+  if [[ ! -d "$source_dir" ]]; then
+    fail "Volume data not found: $source_dir"
+  fi
+
+  info "  Restoring '$path' in container '$container'..."
+
+  docker exec "$container" sh -c "rm -rf '${path:?}/'*" \
+    || fail "Failed to clear '$path' in container '$container'"
+
+  # A tar stream keeps owner and mode, a plain docker cp resets them to the caller
+  tar -C "$source_dir" -cf - . \
+    | docker cp - "$container:$path/" \
+    || fail "docker cp failed for '$path' into container '$container'"
+
+  info "  Volume restore complete for '$path'"
+}
+
 backup_dir() {
   local svc_name="$1"
   local target_dir="$2"
@@ -591,6 +955,43 @@ restore_dir() {
   info "  Directory restore complete for '$dir_path'"
 }
 
+command_ls_restic() {
+  local prefix="$1"
+  local timestamps="$2"
+
+  require_config
+  require_restic_config
+
+  local repo_prefix s3_path
+  repo_prefix="$(restic_repo_prefix)"
+  s3_path="s3://${S3_BUCKET}${repo_prefix:+/$repo_prefix}"
+  info "Listing restic snapshots in ${s3_path}/${prefix}..."
+
+  local rows
+  if [[ -n "$prefix" ]]; then
+    local name="${prefix%/}"
+    if ! restic_repo_exists "$(restic_repository_for "$name")"; then
+      info "No backups found."
+      return 0
+    fi
+    rows="$(restic_snapshot_rows "$(restic_repository_for "$name")" \
+      | awk -F'\t' -v name="$name" '{ print $1 "\t" name "/" $2 }')"
+  else
+    rows="$(restic_all_snapshot_rows)"
+  fi
+
+  if [[ -z "$rows" ]]; then
+    info "No backups found."
+    return 0
+  fi
+
+  if [[ "$timestamps" == true ]]; then
+    echo "$rows"
+  else
+    echo "$rows" | format_snapshot_refs
+  fi
+}
+
 command_ls() {
   local tree=false
   local timestamps=false
@@ -613,6 +1014,13 @@ command_ls() {
         ;;
     esac
   done
+
+  load_config || true
+
+  if [[ "$(backend)" == restic ]]; then
+    command_ls_restic "$prefix" "$timestamps"
+    return 0
+  fi
 
   require_config
 
@@ -660,12 +1068,17 @@ command_ls() {
 command_cleanup() {
   local dry_run=false
   local backupfile=""
+  local backend_override=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dry-run)
         dry_run=true
         shift
+        ;;
+      --backend)
+        backend_override="$2"
+        shift 2
         ;;
       -f | --file)
         backupfile="$2"
@@ -678,7 +1091,16 @@ command_cleanup() {
     esac
   done
 
+  load_config || true
   require_config
+
+  # Pin the backend for this run, command_ls must follow the same choice
+  if [[ -n "$backend_override" ]]; then
+    BACKEND_OVERRIDE="$backend_override"
+  fi
+
+  local selected_backend
+  selected_backend="$(backend)"
 
   # With a Parbackupfile, only its own backups are cleaned up, using its RETENTION_DAYS
   local scope=""
@@ -686,7 +1108,8 @@ command_cleanup() {
   if [[ -n "$backupfile" ]]; then
     require_parbackupfile "$backupfile"
     scope="$BACKUP_NAME"
-    retention_days="${BACKUP_RETENTION_DAYS:-${RETENTION_DAYS:-0}}"
+    retention_days="$(effective_retention_days)"
+    warn_unused_retention
   fi
 
   if [[ "$retention_days" == "0" || -z "$retention_days" ]]; then
@@ -758,7 +1181,12 @@ command_cleanup() {
     fi
   fi
 
-  # --- Clean up old remote S3 backups ---
+  # --- Clean up old remote backups ---
+  if [[ "$selected_backend" == restic ]]; then
+    command_cleanup_restic "$backupfile" "$dry_run" "$retention_days"
+    return 0
+  fi
+
   local ts_list
   ts_list="$(command_ls --timestamps "${scope:+${scope}/}" 2> /dev/null)"
 
@@ -791,6 +1219,295 @@ command_cleanup() {
       info "No old remote backups to delete."
     fi
   fi
+}
+
+# Forget restic snapshots beyond the retention. Prune frees the space right away.
+command_cleanup_restic() {
+  local backupfile="$1"
+  local dry_run="$2"
+  local retention_days="$3"
+
+  local -a names=()
+  local retention_weekly retention_monthly
+
+  if [[ -n "$backupfile" ]]; then
+    names+=("$BACKUP_NAME")
+    retention_weekly="$(effective_retention_weekly)"
+    retention_monthly="$(effective_retention_monthly)"
+  else
+    mapfile -t names < <(restic_repo_names | sort)
+    retention_weekly="${RETENTION_WEEKLY:-}"
+    retention_monthly="${RETENTION_MONTHLY:-}"
+  fi
+
+  if [[ ${#names[@]} -eq 0 ]]; then
+    info "No restic repositories found."
+    return 0
+  fi
+
+  require_restic_config
+
+  local name
+  for name in "${names[@]}"; do
+    local repository
+    repository="$(restic_repository_for "$name")"
+
+    if ! restic_repo_exists "$repository"; then
+      warn "No restic repository at $repository"
+      continue
+    fi
+
+    local -a forget_args=(--tag "$name" --keep-daily "$retention_days")
+    [[ -n "$retention_weekly" ]] && forget_args+=(--keep-weekly "$retention_weekly")
+    [[ -n "$retention_monthly" ]] && forget_args+=(--keep-monthly "$retention_monthly")
+
+    if [[ "$dry_run" == true ]]; then
+      info "Would forget snapshots of '$name' beyond retention..."
+      forget_args+=(--dry-run)
+    else
+      info "Forgetting snapshots of '$name' beyond retention and pruning..."
+      forget_args+=(--prune --max-unused 10%)
+    fi
+
+    restic_cmd "$repository" forget "${forget_args[@]}" \
+      2>&1 | _tee_to_log "restic forget"
+  done
+}
+
+# Prune the repositories of one Parbackupfile or of the whole base.
+command_restic_prune() {
+  local backupfile=""
+  local dry_run=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        dry_run=true
+        shift
+        ;;
+      -f | --file)
+        backupfile="$2"
+        shift 2
+        ;;
+      -h | --help)
+        print_restic_help
+        exit 0
+        ;;
+      *)
+        fail_restic_help "Unknown option '$1' for 'restic prune'"
+        ;;
+    esac
+  done
+
+  load_config || true
+
+  if [[ -n "$backupfile" ]]; then
+    require_parbackupfile "$backupfile"
+  fi
+
+  require_config
+  require_restic_config
+
+  local -a names=()
+  if [[ -n "$backupfile" ]]; then
+    names+=("$BACKUP_NAME")
+  else
+    mapfile -t names < <(restic_repo_names | sort)
+  fi
+
+  if [[ ${#names[@]} -eq 0 ]]; then
+    info "No restic repositories found."
+    return 0
+  fi
+
+  local name
+  for name in "${names[@]}"; do
+    local repository
+    repository="$(restic_repository_for "$name")"
+
+    if ! restic_repo_exists "$repository"; then
+      warn "No restic repository at $repository"
+      continue
+    fi
+
+    local -a prune_args=(--max-unused 10%)
+    [[ "$dry_run" == true ]] && prune_args+=(--dry-run)
+
+    info "Pruning restic repository $repository..."
+    restic_cmd "$repository" prune "${prune_args[@]}" \
+      2>&1 | _tee_to_log "restic prune"
+  done
+}
+
+command_restic_check() {
+  local backupfile=""
+  local read_data_subset=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --read-data-subset)
+        read_data_subset="$2"
+        shift 2
+        ;;
+      -f | --file)
+        backupfile="$2"
+        shift 2
+        ;;
+      -h | --help)
+        print_restic_help
+        exit 0
+        ;;
+      *)
+        fail_restic_help "Unknown option '$1' for 'restic check'"
+        ;;
+    esac
+  done
+
+  load_config || true
+
+  if [[ -n "$backupfile" ]]; then
+    require_parbackupfile "$backupfile"
+  fi
+
+  require_config
+  require_restic_config
+
+  local -a names=()
+  if [[ -n "$backupfile" ]]; then
+    names+=("$BACKUP_NAME")
+  else
+    mapfile -t names < <(restic_repo_names | sort)
+  fi
+
+  if [[ ${#names[@]} -eq 0 ]]; then
+    info "No restic repositories found."
+    return 0
+  fi
+
+  local name
+  for name in "${names[@]}"; do
+    local repository
+    repository="$(restic_repository_for "$name")"
+
+    if ! restic_repo_exists "$repository"; then
+      warn "No restic repository at $repository"
+      continue
+    fi
+
+    local -a check_args=()
+    [[ -n "$read_data_subset" ]] && check_args+=(--read-data-subset "$read_data_subset")
+
+    info "Checking restic repository $repository..."
+    restic_cmd "$repository" check "${check_args[@]}" \
+      2>&1 | _tee_to_log "restic check"
+  done
+}
+
+command_restic_init() {
+  local backupfile=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f | --file)
+        backupfile="$2"
+        shift 2
+        ;;
+      -h | --help)
+        print_restic_help
+        exit 0
+        ;;
+      *)
+        fail_restic_help "Unknown option '$1' for 'restic init'"
+        ;;
+    esac
+  done
+
+  load_config || true
+
+  if [[ -n "$backupfile" ]]; then
+    require_parbackupfile "$backupfile"
+  else
+    require_parbackupfile
+  fi
+
+  local selected_backend
+  selected_backend="$(backend)"
+  if [[ "$selected_backend" != restic ]]; then
+    fail "BACKUP_BACKEND is '$selected_backend', there is no restic repository to initialize for '$BACKUP_NAME'"
+  fi
+
+  require_config
+  require_restic_config
+
+  local repository
+  repository="$(restic_repository_for "$BACKUP_NAME")"
+  restic_init_repository "$repository"
+  info "Repository ready: $repository"
+}
+
+# --- restic subcommands ---
+
+print_restic_help() {
+  cat << EOF
+$script_name v$script_version -- restic repository maintenance
+
+Usage: parbackup restic <command> [options]
+
+Commands:
+  init      Create the restic repository of a Parbackupfile
+  prune     Release the space of forgotten snapshots
+  check     Verify a restic repository
+
+Options:
+  init:
+    -f, --file <path>  Parbackupfile whose repository to create
+
+  prune:
+    --dry-run          Show what prune would free, without rewriting packs
+    -f, --file <path>  Only prune the repository of this Parbackupfile
+
+  check:
+    --read-data-subset <value>  Read a share of the packs, e.g. 1/7 or 5%
+    -f, --file <path>  Only check the repository of this Parbackupfile
+
+Examples:
+  parbackup restic init -f /opt/my-project/Parbackupfile
+  parbackup restic prune -f /opt/my-project/Parbackupfile
+  parbackup restic prune --dry-run
+  parbackup restic check -f /opt/my-project/Parbackupfile --read-data-subset 1/7
+EOF
+}
+
+fail_restic_help() {
+  error "$1"
+  echo ""
+  print_restic_help
+  exit 1
+}
+
+command_restic() {
+  local subcmd="${1:-}"
+
+  case "$subcmd" in
+    init)
+      shift
+      command_restic_init "$@"
+      ;;
+    prune)
+      shift
+      command_restic_prune "$@"
+      ;;
+    check)
+      shift
+      command_restic_check "$@"
+      ;;
+    "" | help | -h | --help)
+      print_restic_help
+      ;;
+    *)
+      fail_restic_help "Unknown restic command '$subcmd'. Use 'restic init', 'restic prune' or 'restic check'."
+      ;;
+  esac
 }
 
 _create_error_handler() {
@@ -828,6 +1545,7 @@ command_create() {
 
   local local_only=false
   local keep_local=false
+  local no_prune=false
   local backupfile=""
 
   # Parse options
@@ -841,6 +1559,10 @@ command_create() {
         keep_local=true
         shift
         ;;
+      --no-prune)
+        no_prune=true
+        shift
+        ;;
       -f | --file)
         backupfile="$2"
         shift 2
@@ -850,6 +1572,8 @@ command_create() {
         ;;
     esac
   done
+
+  load_config || true
 
   # Require S3 config unless --local
   if [[ "$local_only" != true ]]; then
@@ -870,6 +1594,17 @@ command_create() {
   else
     require_parbackupfile
     backupfile="./$parbackupfile_name"
+  fi
+
+  warn_unused_retention
+
+  if [[ "$(backend)" == restic ]]; then
+    command_create_restic "$backupfile" "$local_only" "$keep_local" "$no_prune"
+    return 0
+  fi
+
+  if [[ "$no_prune" == true ]]; then
+    warn "--no-prune has no effect with BACKUP_BACKEND=builtin"
   fi
 
   local timestamp
@@ -969,6 +1704,149 @@ command_create() {
   RUN_LOG_FILE=""
 }
 
+# --- create with the restic backend ---
+
+command_create_restic() {
+  local backupfile="$1"
+  local local_only="$2"
+  local keep_local="$3"
+  local no_prune="$4"
+
+  local staging="${restic_staging_root}/${BACKUP_NAME}"
+  local repository=""
+
+  if [[ "$local_only" != true ]]; then
+    require_restic_config
+    repository="$(restic_repository_for "$BACKUP_NAME")"
+  fi
+
+  info "Creating backup: $staging"
+  rm -rf "$staging"
+  mkdir -p "$staging"
+
+  # Enable logging to file inside the staging directory
+  BACKUP_LOG_FILE="${staging}/parbackup.log"
+  info "Logging to $BACKUP_LOG_FILE"
+
+  # Save the Parbackupfile into the staging directory (always stored as "Parbackupfile")
+  cp "$backupfile" "$staging/Parbackupfile"
+  info "Saved $backupfile to backup directory"
+
+  # Docker volumes and host directories are read in place, the manifest keeps the map
+  local -a paths=("$staging")
+
+  IFS=',' read -ra svc_list <<< "$SERVICES"
+
+  for svc_name in "${svc_list[@]}"; do
+    svc_name="$(echo "$svc_name" | xargs)"
+
+    local svc_type
+    svc_type="$(require_svc_var "$svc_name" "TYPE")"
+
+    info "Processing service '$svc_name' (type: $svc_type)..."
+
+    local svc_target_dir="${staging}/${svc_name}"
+    mkdir -p "$svc_target_dir"
+
+    local host_path=""
+
+    case "$svc_type" in
+      postgres)
+        backup_postgres "$svc_name" "$svc_target_dir"
+        ;;
+      mongo)
+        backup_mongo "$svc_name" "$svc_target_dir"
+        ;;
+      mysql)
+        backup_mysql "$svc_name" "$svc_target_dir"
+        ;;
+      volume)
+        host_path="$(resolve_host_path "$svc_name" || true)"
+        if [[ -n "$host_path" ]]; then
+          info "  Reading '$host_path' in place"
+          record_manifest_entry "$staging" "$svc_name" volume "$host_path"
+          paths+=("$host_path")
+        else
+          warn "  '$svc_name' is not a volume mount, falling back to docker cp"
+          backup_volume "$svc_name" "$svc_target_dir"
+        fi
+        ;;
+      dir)
+        host_path="$(require_svc_var "$svc_name" "PATH")"
+        if [[ ! -d "$host_path" ]]; then
+          fail "Directory '$host_path' does not exist"
+        fi
+        info "  Reading '$host_path' in place"
+        record_manifest_entry "$staging" "$svc_name" dir "$host_path"
+        paths+=("$host_path")
+        ;;
+      *)
+        fail "Unknown service type '$svc_type' for service '$svc_name'"
+        ;;
+    esac
+  done
+
+  # Disable the backup log before restic reads the staging tree
+  BACKUP_LOG_FILE=""
+
+  if [[ "$local_only" == true ]]; then
+    trap - EXIT
+    info "Backup staged: $staging"
+    rm -f "$RUN_LOG_FILE"
+    RUN_LOG_FILE=""
+    return 0
+  fi
+
+  local -a unique_paths=()
+  mapfile -t unique_paths < <(printf '%s\n' "${paths[@]}" | awk '!seen[$0]++')
+
+  restic_init_repository "$repository"
+
+  info "Uploading to restic repository $repository"
+  restic_cmd "$repository" backup \
+    --tag "$BACKUP_NAME" \
+    --host "$BACKUP_NAME" \
+    "${unique_paths[@]}" \
+    2>&1 | _tee_to_log "restic backup"
+
+  local retention_days retention_weekly retention_monthly
+  retention_days="$(effective_retention_days)"
+  retention_weekly="$(effective_retention_weekly)"
+  retention_monthly="$(effective_retention_monthly)"
+
+  if [[ -z "$retention_days" || "$retention_days" == "0" ]]; then
+    info "Retention is disabled (RETENTION_DAYS=0). No snapshots are forgotten."
+  else
+    local -a forget_args=(--tag "$BACKUP_NAME" --keep-daily "$retention_days")
+    [[ -n "$retention_weekly" ]] && forget_args+=(--keep-weekly "$retention_weekly")
+    [[ -n "$retention_monthly" ]] && forget_args+=(--keep-monthly "$retention_monthly")
+
+    if [[ "$no_prune" == true ]]; then
+      info "Forgetting snapshots beyond retention, prune is disabled (--no-prune)"
+    else
+      info "Forgetting snapshots beyond retention and pruning"
+      forget_args+=(--prune --max-unused 10%)
+    fi
+
+    restic_cmd "$repository" forget "${forget_args[@]}" \
+      2>&1 | _tee_to_log "restic forget"
+  fi
+
+  # The snapshot holds the data, the staging tree only needs its paths to stay
+  if [[ "$keep_local" != true ]]; then
+    find "$staging" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    info "Removed staging contents of $staging"
+  fi
+
+  # Clear error notification trap on success
+  trap - EXIT
+
+  info "Backup complete: restic snapshot of '$BACKUP_NAME' in $repository"
+
+  rm -f "$RUN_LOG_FILE"
+  RUN_LOG_FILE=""
+}
+
 _sq() {
   # Escape a value for safe use inside single quotes: replace ' with '\''
   printf '%s' "${1//\'/\'\\\'\'}"
@@ -978,12 +1856,18 @@ save_config() {
   mkdir -p "$config_dir"
   cat > "$config_file" << EOF
 # parbackup configuration
+BACKUP_BACKEND='$(_sq "${BACKUP_BACKEND:-builtin}")'
 S3_ENDPOINT='$(_sq "${S3_ENDPOINT:-}")'
 S3_BUCKET='$(_sq "${S3_BUCKET:-}")'
 S3_ACCESS_KEY='$(_sq "${S3_ACCESS_KEY:-}")'
 S3_SECRET_KEY='$(_sq "${S3_SECRET_KEY:-}")'
 S3_REGION='$(_sq "${S3_REGION:-}")'
+RESTIC_REPO_PREFIX='$(_sq "${RESTIC_REPO_PREFIX:-restic}")'
+RESTIC_SECRET_FILE='$(_sq "${RESTIC_SECRET_FILE:-}")'
+RESTIC_CACHE_DIR='$(_sq "${RESTIC_CACHE_DIR:-}")'
 RETENTION_DAYS='$(_sq "${RETENTION_DAYS:-7}")'
+RETENTION_WEEKLY='$(_sq "${RETENTION_WEEKLY:-}")'
+RETENTION_MONTHLY='$(_sq "${RETENTION_MONTHLY:-}")'
 EOF
   chmod 600 "$config_file"
   info "Config saved to $config_file"
@@ -1008,6 +1892,55 @@ config_set_s3() {
   save_config
 }
 
+write_restic_secret() {
+  local secret
+  secret="$(restic_secret_file)"
+
+  if [[ -f "$secret" ]]; then
+    info "Secret file already exists: $secret"
+    warn "Without this password the backups cannot be restored. Keep a copy outside this host."
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$secret")"
+  local password
+  password="$(gum input --password --placeholder "repository password" \
+    --header "Restic repository password")"
+
+  if [[ -z "$password" ]]; then
+    fail "No password entered, the restic backend cannot be used without one."
+  fi
+
+  (umask 077 && printf '%s\n' "$password" > "$secret")
+
+  info "Secret saved to $secret"
+  warn "Without this password the backups cannot be restored. Keep a copy outside this host."
+}
+
+config_set_restic() {
+  info "Configuring restic backend..."
+
+  BACKUP_BACKEND="$(gum choose --header "Default backup backend" "builtin" "restic")"
+  RESTIC_REPO_PREFIX="$(gum input --placeholder "restic" \
+    --header "Prefix in the bucket for the restic repositories" --value "${RESTIC_REPO_PREFIX:-restic}")"
+  RESTIC_SECRET_FILE="$(gum input --placeholder "${config_dir}/restic-secret" \
+    --header "Secret file with the repository password" --value "${RESTIC_SECRET_FILE:-}")"
+  RESTIC_CACHE_DIR="$(gum input --placeholder "/var/cache/parbackup/restic" \
+    --header "Restic cache directory" --value "${RESTIC_CACHE_DIR:-}")"
+  RETENTION_DAYS="$(gum input --placeholder "7" \
+    --header "Retention: keep-daily (0 = keep forever)" --value "${RETENTION_DAYS:-7}")"
+  RETENTION_WEEKLY="$(gum input --placeholder "empty = unset" \
+    --header "Retention: keep-weekly" --value "${RETENTION_WEEKLY:-}")"
+  RETENTION_MONTHLY="$(gum input --placeholder "empty = unset" \
+    --header "Retention: keep-monthly" --value "${RETENTION_MONTHLY:-}")"
+
+  save_config
+
+  if [[ "$BACKUP_BACKEND" == restic ]]; then
+    write_restic_secret
+  fi
+}
+
 command_config() {
   local subcmd="${1:-}"
   local section="${2:-}"
@@ -1018,11 +1951,18 @@ command_config() {
   case "$subcmd" in
     set)
       case "$section" in
-        s3 | "")
+        s3)
           config_set_s3
           ;;
+        restic)
+          config_set_restic
+          ;;
+        "")
+          config_set_s3
+          config_set_restic
+          ;;
         *)
-          fail_help "Unknown config section '$section'. Use 'config set' or 'config set s3'."
+          fail_help "Unknown config section '$section'. Use 'config set', 'config set s3' or 'config set restic'."
           ;;
       esac
       ;;
@@ -1035,12 +1975,18 @@ command_config() {
       fi
       echo "Config: $config_file"
       echo ""
+      echo "BACKUP_BACKEND   = ${BACKUP_BACKEND:-builtin}"
       echo "S3_ENDPOINT      = ${S3_ENDPOINT:-<not set>}"
       echo "S3_BUCKET        = ${S3_BUCKET:-<not set>}"
       echo "S3_ACCESS_KEY    = $(mask_secret "${S3_ACCESS_KEY:-}")"
       echo "S3_SECRET_KEY    = $(mask_secret "${S3_SECRET_KEY:-}")"
       echo "S3_REGION        = ${S3_REGION:-<not set>}"
+      echo "RESTIC_REPO_PREFIX  = $(restic_repo_prefix)"
+      echo "RESTIC_SECRET_FILE  = $(restic_secret_file)"
+      echo "RESTIC_CACHE_DIR    = $(restic_cache_dir)"
       echo "RETENTION_DAYS   = ${RETENTION_DAYS:-<not set>}"
+      echo "RETENTION_WEEKLY = ${RETENTION_WEEKLY:-<not set>}"
+      echo "RETENTION_MONTHLY = ${RETENTION_MONTHLY:-<not set>}"
       ;;
 
     *)
@@ -1233,16 +2179,18 @@ command_download() {
       fail "--pick does not accept a backup reference argument"
     fi
 
-    require_config
+    load_config || true
 
     local keys
     keys="$(command_ls 2> /dev/null)"
 
     if [[ -z "$keys" ]]; then
-      fail "No backups found on S3."
+      fail "No backups found."
     fi
 
     backup_ref="$(echo "$keys" | gum filter)"
+    # The restic listing prefixes a human readable time, the key follows a tab
+    backup_ref="${backup_ref##*$'\t'}"
 
     if [[ -z "$backup_ref" ]]; then
       info "No backup selected."
@@ -1252,6 +2200,41 @@ command_download() {
 
   if [[ -z "$backup_ref" ]]; then
     fail_help "Missing required argument: <backup_ref>"
+  fi
+
+  load_config || true
+
+  if [[ "$(backend)" == restic ]]; then
+    require_config
+    require_restic_config
+
+    local repo_name snapshot_id
+    parse_snapshot_ref "$backup_ref"
+    repo_name="$RESTORE_REPO_NAME"
+    snapshot_id="$RESTORE_SNAPSHOT"
+
+    local target="${working_dir}/${repo_name}-${snapshot_id}"
+
+    if [[ -e "$target" ]]; then
+      warn "Directory already exists: $target"
+      if [[ "$force" == true ]] || gum confirm --default=No "Overwrite?"; then
+        rm -rf "$target"
+      else
+        info "Download cancelled."
+        exit 0
+      fi
+    fi
+
+    local repository
+    repository="$(restic_repository_for "$repo_name")"
+    if ! restic_repo_exists "$repository"; then
+      fail "No restic repository at $repository"
+    fi
+
+    restic_restore_snapshot "$repository" "$snapshot_id" "$target" "$repo_name" > /dev/null
+    info "Downloaded to $target"
+    echo "$target"
+    return 0
   fi
 
   require_config
@@ -1318,6 +2301,10 @@ command_restore() {
   fi
 
   local backup_dir=""
+  local restore_root=""
+  local prompted=false
+
+  load_config || true
 
   if [[ "$local_only" == true ]]; then
     # Local mode: backup_ref is a local .tar.gz or directory
@@ -1338,10 +2325,71 @@ command_restore() {
         fail "Archive does not contain a backup directory"
       fi
     elif [[ -d "$backup_ref" ]]; then
-      backup_dir="$backup_ref"
+      if [[ -f "${backup_ref}/Parbackupfile" ]]; then
+        backup_dir="$backup_ref"
+        # An unpacked restic restore keeps the staging tree below its absolute path
+        local staging_marker="${restic_staging_root}/"
+        if [[ "$backup_ref" == *"${staging_marker}"* ]]; then
+          restore_root="${backup_ref%%${staging_marker}*}"
+        fi
+      else
+        local found_backupfile
+        found_backupfile="$(find "$backup_ref" -maxdepth 8 -name Parbackupfile -print -quit 2> /dev/null)"
+        if [[ -z "$found_backupfile" ]]; then
+          fail "Backup path not found: $backup_ref (expected a directory or .tar.gz file)"
+        fi
+        backup_dir="$(dirname "$found_backupfile")"
+        restore_root="$backup_ref"
+      fi
     else
       fail "Backup path not found: $backup_ref (expected a directory or .tar.gz file)"
     fi
+  elif [[ "$(backend)" == restic ]]; then
+    require_config
+    require_restic_config
+
+    if [[ "$pick" == true ]]; then
+      local choices
+      choices="$(restic_all_snapshot_rows | format_snapshot_refs)"
+      if [[ -z "$choices" ]]; then
+        fail "No backups found."
+      fi
+
+      backup_ref="$(echo "$choices" | gum filter)"
+      backup_ref="${backup_ref##*$'\t'}"
+
+      if [[ -z "$backup_ref" ]]; then
+        info "No backup selected."
+        exit 0
+      fi
+    fi
+
+    if [[ -z "$backup_ref" ]]; then
+      fail_help "Missing required argument: <backup_ref>"
+    fi
+
+    parse_snapshot_ref "$backup_ref"
+
+    local repository
+    repository="$(restic_repository_for "$RESTORE_REPO_NAME")"
+    if ! restic_repo_exists "$repository"; then
+      fail "No restic repository at $repository"
+    fi
+
+    if [[ "$force" != true ]]; then
+      warn "You are about to restore deployment '$RESTORE_REPO_NAME' from: $repository ($RESTORE_SNAPSHOT)"
+      warn "This will DROP and recreate all databases listed in the backup."
+
+      if ! gum confirm --default=No "Proceed with restore?"; then
+        info "Restore cancelled."
+        exit 0
+      fi
+    fi
+    prompted=true
+
+    extracted_tmp="$(mktemp -d "${working_dir}/restore-XXXXXX")"
+    backup_dir="$(restic_restore_snapshot "$repository" "$RESTORE_SNAPSHOT" "$extracted_tmp" "$RESTORE_REPO_NAME")"
+    restore_root="$extracted_tmp"
   else
     # S3 mode: delegate download to command_download
     local download_args=()
@@ -1362,22 +2410,38 @@ command_restore() {
       exit 0
     fi
 
-    extracted_tmp="$(mktemp -d "${working_dir}/restore-XXXXXX")"
-    info "Extracting $local_archive..."
-    tar -xzf "$local_archive" -C "$extracted_tmp"
-    backup_dir="$(find "$extracted_tmp" -mindepth 1 -maxdepth 1 -type d | head -1)"
-    if [[ -z "$backup_dir" ]]; then
-      rm -rf "$extracted_tmp"
-      fail "Archive does not contain a backup directory"
-    fi
+    if [[ -d "$local_archive" ]]; then
+      # The restic backend downloads a restored tree, not an archive
+      local found_backupfile
+      found_backupfile="$(find "$local_archive" -maxdepth 8 -name Parbackupfile -print -quit 2> /dev/null)"
+      if [[ -z "$found_backupfile" ]]; then
+        fail "Downloaded data does not contain a Parbackupfile: $local_archive"
+      fi
+      backup_dir="$(dirname "$found_backupfile")"
+      restore_root="$local_archive"
+      extracted_tmp="$local_archive"
+    else
+      extracted_tmp="$(mktemp -d "${working_dir}/restore-XXXXXX")"
+      info "Extracting $local_archive..."
+      tar -xzf "$local_archive" -C "$extracted_tmp"
+      backup_dir="$(find "$extracted_tmp" -mindepth 1 -maxdepth 1 -type d | head -1)"
+      if [[ -z "$backup_dir" ]]; then
+        rm -rf "$extracted_tmp"
+        fail "Archive does not contain a backup directory"
+      fi
 
-    # Clean up downloaded archive
-    rm -f "$local_archive"
+      # Clean up downloaded archive
+      rm -f "$local_archive"
+    fi
   fi
 
   require_parbackupfile "${backup_dir}/Parbackupfile"
 
-  if [[ "$force" != true ]]; then
+  if [[ -n "$restore_root" && -n "${RESTORE_REPO_NAME:-}" && "$BACKUP_NAME" != "$RESTORE_REPO_NAME" ]]; then
+    warn "Snapshot belongs to '$BACKUP_NAME', repository is named '$RESTORE_REPO_NAME'"
+  fi
+
+  if [[ "$force" != true && "$prompted" != true ]]; then
     warn "You are about to restore deployment '$BACKUP_NAME' from: $backup_dir"
     warn "This will DROP and recreate all databases listed in the backup."
 
@@ -1402,6 +2466,17 @@ command_restore() {
     info "Restoring service '$svc_name' (type: $svc_type)..."
 
     local svc_source_dir="${backup_dir}/${svc_name}"
+    local volume_from_dir=false
+
+    # Volumes and directories are stored at their host path inside the snapshot
+    if [[ -n "$restore_root" && ("$svc_type" == "volume" || "$svc_type" == "dir") ]]; then
+      local host_path
+      host_path="$(manifest_host_path "$backup_dir" "$svc_name" || true)"
+      if [[ -n "$host_path" ]]; then
+        svc_source_dir="${restore_root}${host_path}"
+        [[ "$svc_type" == "volume" ]] && volume_from_dir=true
+      fi
+    fi
 
     if [[ ! -d "$svc_source_dir" ]]; then
       fail "Service directory not found in backup: $svc_source_dir"
@@ -1418,7 +2493,16 @@ command_restore() {
         restore_mysql "$svc_name" "$svc_source_dir"
         ;;
       volume)
-        restore_volume "$svc_name" "$svc_source_dir"
+        if [[ "$volume_from_dir" == true ]]; then
+          restore_volume_from_dir "$svc_name" "$svc_source_dir"
+        elif [[ -f "${svc_source_dir}/volume.tar" ]]; then
+          restore_volume "$svc_name" "$svc_source_dir"
+        elif [[ -n "$restore_root" ]]; then
+          fail "No volume data for '$svc_name' in the snapshot (no manifest entry, no volume.tar)"
+        else
+          # Archives before v1.7.0 hold plain files without owner information
+          restore_volume "$svc_name" "$svc_source_dir"
+        fi
         ;;
       dir)
         restore_dir "$svc_name" "$svc_source_dir"
@@ -1463,6 +2547,7 @@ case "$subcommand" in
   download) command_download "$@" ;;
   ls) command_ls "$@" ;;
   cleanup) command_cleanup "$@" ;;
+  restic) command_restic "$@" ;;
   cron) command_cron "$@" ;;
   restore) command_restore "$@" ;;
   config) command_config "$@" ;;
