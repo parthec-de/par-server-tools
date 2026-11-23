@@ -1886,6 +1886,40 @@ EOF
   [[ "$output" != *"/data/"* ]]
 }
 
+@test "restic: the picker shows the backend of every backup" {
+  require_restic
+
+  local stub_dir gum_input
+  stub_dir="${BATS_TEST_TMPDIR}/gum-stub"
+  gum_input="${BATS_TEST_TMPDIR}/gum-input"
+  mkdir -p "$stub_dir"
+
+  # A stub replaces gum, so the picker can run without a terminal
+  cat > "${stub_dir}/gum" << 'EOF'
+#!/usr/bin/env bash
+case "$1" in
+  filter)
+    cat > "${GUM_INPUT:?}"
+    exit 1
+    ;;
+  log)
+    echo "${@: -1}"
+    ;;
+esac
+EOF
+  chmod +x "${stub_dir}/gum"
+
+  run env PATH="${stub_dir}:${PATH}" GUM_INPUT="$gum_input" HOME="$RESTIC_CONFIG_DIR" \
+    "$PARBACKUP" download --pick
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"No backup selected"* ]]
+
+  local input
+  input="$(cat "$gum_input")"
+  [[ "$input" =~ test_mixed_ls/.*\.tar\.gz\ +builtin ]]
+  [[ "$input" =~ test_deployment/[0-9a-f]+\ +restic ]]
+}
+
 @test "restic: download restores a snapshot into a directory" {
   require_restic
 

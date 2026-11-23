@@ -609,25 +609,45 @@ pickable_rows() {
   done
 }
 
-# Turn "<epoch>\t<reference>" from stdin into "<YYYY-mm-dd HH:MM>\t<reference>".
-format_snapshot_refs() {
-  while IFS=$'\t' read -r epoch reference; do
-    [[ -z "$epoch" ]] && continue
-    printf '%s\t%s\n' "$(date -d "@${epoch}" '+%Y-%m-%d %H:%M')" "$reference"
-  done
+# Print the picker lines, "time  reference  backend", aligned.
+pickable_display_rows() {
+  local rows
+  rows="$(pickable_rows | sort -n)"
+  [[ -z "$rows" ]] && return 0
+
+  local -a lines=()
+  local epoch ref time backend width=0
+  while IFS=$'\t' read -r epoch ref; do
+    [[ -z "$epoch" || -z "$ref" ]] && continue
+    time="$(date -d "@${epoch}" '+%Y-%m-%d %H:%M')"
+
+    if [[ "$ref" == *.tar.gz ]]; then
+      backend="builtin"
+    else
+      backend="restic"
+    fi
+
+    lines+=("${time}"$'\t'"${ref}"$'\t'"${backend}")
+    ((${#ref} > width)) && width="${#ref}"
+  done <<< "$rows"
+
+  printf '%s\n' "${lines[@]}" \
+    | awk -F'\t' -v width="$width" '{ printf "%s  %-*s  %s\n", $1, width, $2, $3 }'
 }
 
 # Print the reference the user picks, or nothing when the picker is cancelled.
 pick_backup_ref() {
-  local choices selection
-  choices="$(pickable_rows | sort -n | format_snapshot_refs)"
+  local display selection
+  display="$(pickable_display_rows)"
 
-  if [[ -z "$choices" ]]; then
+  if [[ -z "$display" ]]; then
     fail "No backups found."
   fi
 
-  selection="$(echo "$choices" | gum filter || true)"
-  echo "${selection##*$'\t'}"
+  selection="$(echo "$display" | gum filter || true)"
+  [[ -z "$selection" ]] && return 0
+
+  printf '%s' "$selection" | sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} +//; s/ +(builtin|restic)$//'
 }
 
 # Split "<backup_name>/<snapshot_id>" into RESTORE_REPO_NAME and RESTORE_SNAPSHOT.
