@@ -1854,9 +1854,36 @@ EOF
   [[ "$output" != *"test_restic_scope/"* ]]
 
   local timestamps
-  timestamps="$(restic_parbackup ls --timestamps 2> /dev/null | grep "test_deployment/" | head -1)"
+  timestamps="$(restic_parbackup ls --timestamps 2> /dev/null | grep -E "test_deployment/[0-9a-f]+$" | head -1)"
   [ -n "$timestamps" ]
   [[ "$timestamps" =~ ^[0-9]+$'\t'test_deployment/[0-9a-f]+$ ]]
+}
+
+@test "restic: ls lists archives and snapshots together without repository internals" {
+  require_restic
+
+  local backupfile="${BATS_TEST_TMPDIR}/Parbackupfile.mixed_ls"
+  cat > "$backupfile" << 'EOF'
+BACKUP_NAME="test_mixed_ls"
+RETENTION_DAYS="0"
+SERVICES="static"
+STATIC_TYPE="dir"
+STATIC_PATH="/tmp/parbackup-test-localdir"
+EOF
+
+  run env HOME="$TEST_CONFIG_DIR" "$PARBACKUP" create -f "$backupfile"
+  [ "$status" -eq 0 ]
+
+  # The listing does not depend on the configured backend
+  run restic_parbackup ls --timestamps
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"test_mixed_ls/test_mixed_ls-"*".tar.gz"* ]]
+  [[ "$output" == *"test_deployment/"* ]]
+
+  # Repository objects never appear as backups
+  [[ "$output" != *"restic/"* ]]
+  [[ "$output" != *"/snapshots/"* ]]
+  [[ "$output" != *"/data/"* ]]
 }
 
 @test "restic: download restores a snapshot into a directory" {

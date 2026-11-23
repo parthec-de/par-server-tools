@@ -560,14 +560,53 @@ restic_snapshot_rows() {
     done
 }
 
-# Print "<epoch>\t<backup_name>/<short_id>" for every snapshot below the prefix.
-restic_all_snapshot_rows() {
+# Print "<epoch>\t<key>" for the builtin archives below the prefix.
+builtin_snapshot_rows() {
+  local prefix="${1:-}"
+
+  s3_cmd ls --recursive "s3://${S3_BUCKET}/${prefix}" 2> >(_tee_to_log "s3 ls") \
+    | while IFS= read -r line; do
+        local file_key
+        file_key="$(echo "$line" | awk '{print $NF}' | cut -d/ -f4-)"
+        [[ "$file_key" == *.tar.gz ]] || continue
+
+        local file_date epoch
+        file_date="$(echo "$line" | awk '{print $1, $2}')"
+        epoch="$(date -d "$file_date" +%s 2> /dev/null || true)"
+        [[ -n "$epoch" ]] && printf '%s\t%s\n' "$epoch" "$file_key"
+    done
+}
+
+# Print "<epoch>\t<reference>" for builtin archives and restic snapshots. A
+# bucket can hold both during a migration, so the listing ignores the
+# configured backend.
+pickable_rows() {
+  local prefix="${1:-}"
   local name
-  while IFS= read -r name; do
-    [[ -z "$name" ]] && continue
+
+  builtin_snapshot_rows "$prefix"
+
+  local -a names=()
+  if [[ -n "$prefix" ]]; then
+    name="${prefix%/}"
+    [[ -n "$name" && "$name" != */* ]] || return 0
+    names+=("$name")
+  else
+    mapfile -t names < <(restic_repo_names | sort)
+  fi
+
+  [[ ${#names[@]} -eq 0 ]] && return 0
+
+  if [[ -z "${RESTIC_PASSWORD:-}" && ! -f "$(restic_secret_file)" ]]; then
+    warn "restic repositories exist, but $(restic_secret_file) is missing"
+    return 0
+  fi
+
+  for name in "${names[@]}"; do
+    restic_repo_exists "$(restic_repository_for "$name")" || continue
     restic_snapshot_rows "$(restic_repository_for "$name")" \
       | awk -F'\t' -v name="$name" '{ print $1 "\t" name "/" $2 }'
-  done < <(restic_repo_names | sort)
+  done
 }
 
 # Turn "<epoch>\t<reference>" from stdin into "<YYYY-mm-dd HH:MM>\t<reference>".
@@ -576,6 +615,19 @@ format_snapshot_refs() {
     [[ -z "$epoch" ]] && continue
     printf '%s\t%s\n' "$(date -d "@${epoch}" '+%Y-%m-%d %H:%M')" "$reference"
   done
+}
+
+# Print the reference the user picks, or nothing when the picker is cancelled.
+pick_backup_ref() {
+  local choices selection
+  choices="$(pickable_rows | sort -n | format_snapshot_refs)"
+
+  if [[ -z "$choices" ]]; then
+    fail "No backups found."
+  fi
+
+  selection="$(echo "$choices" | gum filter || true)"
+  echo "${selection##*$'\t'}"
 }
 
 # Split "<backup_name>/<snapshot_id>" into RESTORE_REPO_NAME and RESTORE_SNAPSHOT.
@@ -955,43 +1007,6 @@ restore_dir() {
   info "  Directory restore complete for '$dir_path'"
 }
 
-command_ls_restic() {
-  local prefix="$1"
-  local timestamps="$2"
-
-  require_config
-  require_restic_config
-
-  local repo_prefix s3_path
-  repo_prefix="$(restic_repo_prefix)"
-  s3_path="s3://${S3_BUCKET}${repo_prefix:+/$repo_prefix}"
-  info "Listing restic snapshots in ${s3_path}/${prefix}..."
-
-  local rows
-  if [[ -n "$prefix" ]]; then
-    local name="${prefix%/}"
-    if ! restic_repo_exists "$(restic_repository_for "$name")"; then
-      info "No backups found."
-      return 0
-    fi
-    rows="$(restic_snapshot_rows "$(restic_repository_for "$name")" \
-      | awk -F'\t' -v name="$name" '{ print $1 "\t" name "/" $2 }')"
-  else
-    rows="$(restic_all_snapshot_rows)"
-  fi
-
-  if [[ -z "$rows" ]]; then
-    info "No backups found."
-    return 0
-  fi
-
-  if [[ "$timestamps" == true ]]; then
-    echo "$rows"
-  else
-    echo "$rows" | format_snapshot_refs
-  fi
-}
-
 command_ls() {
   local tree=false
   local timestamps=false
@@ -1016,53 +1031,41 @@ command_ls() {
   done
 
   load_config || true
-
-  if [[ "$(backend)" == restic ]]; then
-    command_ls_restic "$prefix" "$timestamps"
-    return 0
-  fi
-
   require_config
 
-  info "Listing backups on s3://${S3_BUCKET}/${prefix}..."
+  info "Listing backups in s3://${S3_BUCKET}/${prefix}..."
 
-  local file_list
-  file_list="$(s3_cmd ls --recursive "s3://${S3_BUCKET}/${prefix}" 2> >(_tee_to_log "s3 ls"))"
+  local rows
+  rows="$(pickable_rows "$prefix" | sort -n)"
 
-  if [[ -z "$file_list" ]]; then
+  if [[ -z "$rows" ]]; then
     info "No backups found."
     return 0
   fi
 
   if [[ "$timestamps" == true ]]; then
-    # Output: <epoch>\t<key> — timestamp from s3cmd ls date columns
-    while IFS= read -r line; do
-      local file_date file_key epoch
-      file_date="$(echo "$line" | awk '{print $1, $2}')"
-      file_key="$(echo "$line" | awk '{print $NF}' | cut -d/ -f4-)"
-      epoch="$(date -d "$file_date" +%s 2> /dev/null || true)"
-      [[ -n "$epoch" ]] && echo -e "${epoch}\t${file_key}"
-    done <<< "$file_list"
-  else
-    # Extract plain keys from s3cmd output (strip s3://bucket/ prefix)
-    local keys
-    keys="$(echo "$file_list" | awk '{print $NF}' | cut -d/ -f4-)"
-
-    if [[ "$tree" == true ]]; then
-      local root_dirs
-      root_dirs="$(echo "$keys" | cut -d/ -f1 | sort -u)"
-
-      for dir_name in $root_dirs; do
-        echo "$dir_name"
-        echo "$keys" \
-          | grep "^${dir_name}/" \
-          | cut -d/ -f2- \
-          | sed '$ s/^/└─ /; $ ! s/^/├─ /'
-      done
-    else
-      echo "$keys"
-    fi
+    echo "$rows"
+    return 0
   fi
+
+  local keys
+  keys="$(echo "$rows" | cut -f2)"
+
+  if [[ "$tree" != true ]]; then
+    echo "$keys"
+    return 0
+  fi
+
+  local root_dirs dir_name
+  root_dirs="$(echo "$keys" | cut -d/ -f1 | sort -u)"
+
+  for dir_name in $root_dirs; do
+    echo "$dir_name"
+    echo "$keys" \
+      | grep "^${dir_name}/" \
+      | cut -d/ -f2- \
+      | sed '$ s/^/└─ /; $ ! s/^/├─ /'
+  done
 }
 
 command_cleanup() {
@@ -1188,7 +1191,7 @@ command_cleanup() {
   fi
 
   local ts_list
-  ts_list="$(command_ls --timestamps "${scope:+${scope}/}" 2> /dev/null)"
+  ts_list="$(builtin_snapshot_rows "${scope:+${scope}/}" | sort -n)"
 
   if [[ -z "$ts_list" ]]; then
     info "No remote backups found."
@@ -2174,23 +2177,15 @@ command_download() {
     esac
   done
 
+  load_config || true
+  require_config
+
   if [[ "$pick" == true ]]; then
     if [[ -n "$backup_ref" ]]; then
       fail "--pick does not accept a backup reference argument"
     fi
 
-    load_config || true
-
-    local keys
-    keys="$(command_ls 2> /dev/null)"
-
-    if [[ -z "$keys" ]]; then
-      fail "No backups found."
-    fi
-
-    backup_ref="$(echo "$keys" | gum filter)"
-    # The restic listing prefixes a human readable time, the key follows a tab
-    backup_ref="${backup_ref##*$'\t'}"
+    backup_ref="$(pick_backup_ref)"
 
     if [[ -z "$backup_ref" ]]; then
       info "No backup selected."
@@ -2202,10 +2197,8 @@ command_download() {
     fail_help "Missing required argument: <backup_ref>"
   fi
 
-  load_config || true
-
-  if [[ "$(backend)" == restic ]]; then
-    require_config
+  # The reference tells which kind of backup it is, the configured backend does not
+  if [[ "$backup_ref" != *.tar.gz ]]; then
     require_restic_config
 
     local repo_name snapshot_id
@@ -2236,8 +2229,6 @@ command_download() {
     echo "$target"
     return 0
   fi
-
-  require_config
 
   local local_archive="${working_dir}/$(basename "$backup_ref")"
 
@@ -2344,19 +2335,11 @@ command_restore() {
     else
       fail "Backup path not found: $backup_ref (expected a directory or .tar.gz file)"
     fi
-  elif [[ "$(backend)" == restic ]]; then
+  else
     require_config
-    require_restic_config
 
     if [[ "$pick" == true ]]; then
-      local choices
-      choices="$(restic_all_snapshot_rows | format_snapshot_refs)"
-      if [[ -z "$choices" ]]; then
-        fail "No backups found."
-      fi
-
-      backup_ref="$(echo "$choices" | gum filter)"
-      backup_ref="${backup_ref##*$'\t'}"
+      backup_ref="$(pick_backup_ref)"
 
       if [[ -z "$backup_ref" ]]; then
         info "No backup selected."
@@ -2368,59 +2351,21 @@ command_restore() {
       fail_help "Missing required argument: <backup_ref>"
     fi
 
-    parse_snapshot_ref "$backup_ref"
+    # The reference tells which kind of backup it is, the configured backend does not
+    if [[ "$backup_ref" == *.tar.gz ]]; then
+      local download_args=()
+      if [[ "$force" == true ]]; then
+        download_args+=("--force")
+      fi
+      download_args+=("$backup_ref")
 
-    local repository
-    repository="$(restic_repository_for "$RESTORE_REPO_NAME")"
-    if ! restic_repo_exists "$repository"; then
-      fail "No restic repository at $repository"
-    fi
-
-    if [[ "$force" != true ]]; then
-      warn "You are about to restore deployment '$RESTORE_REPO_NAME' from: $repository ($RESTORE_SNAPSHOT)"
-      warn "This will DROP and recreate all databases listed in the backup."
-
-      if ! gum confirm --default=No "Proceed with restore?"; then
-        info "Restore cancelled."
+      local local_archive
+      local_archive="$(command_download "${download_args[@]}")"
+      # command_download runs in a subshell, so its "exit 0" on cancel only ends the subshell.
+      if [[ -z "$local_archive" ]]; then
         exit 0
       fi
-    fi
-    prompted=true
 
-    extracted_tmp="$(mktemp -d "${working_dir}/restore-XXXXXX")"
-    backup_dir="$(restic_restore_snapshot "$repository" "$RESTORE_SNAPSHOT" "$extracted_tmp" "$RESTORE_REPO_NAME")"
-    restore_root="$extracted_tmp"
-  else
-    # S3 mode: delegate download to command_download
-    local download_args=()
-    if [[ "$force" == true ]]; then
-      download_args+=("--force")
-    fi
-    if [[ "$pick" == true ]]; then
-      download_args+=("--pick")
-    fi
-    if [[ -n "$backup_ref" ]]; then
-      download_args+=("$backup_ref")
-    fi
-
-    local local_archive
-    local_archive="$(command_download "${download_args[@]}")"
-    # command_download runs in a subshell, so its "exit 0" on cancel only ends the subshell.
-    if [[ -z "$local_archive" ]]; then
-      exit 0
-    fi
-
-    if [[ -d "$local_archive" ]]; then
-      # The restic backend downloads a restored tree, not an archive
-      local found_backupfile
-      found_backupfile="$(find "$local_archive" -maxdepth 8 -name Parbackupfile -print -quit 2> /dev/null)"
-      if [[ -z "$found_backupfile" ]]; then
-        fail "Downloaded data does not contain a Parbackupfile: $local_archive"
-      fi
-      backup_dir="$(dirname "$found_backupfile")"
-      restore_root="$local_archive"
-      extracted_tmp="$local_archive"
-    else
       extracted_tmp="$(mktemp -d "${working_dir}/restore-XXXXXX")"
       info "Extracting $local_archive..."
       tar -xzf "$local_archive" -C "$extracted_tmp"
@@ -2432,6 +2377,31 @@ command_restore() {
 
       # Clean up downloaded archive
       rm -f "$local_archive"
+    else
+      require_restic_config
+
+      parse_snapshot_ref "$backup_ref"
+
+      local repository
+      repository="$(restic_repository_for "$RESTORE_REPO_NAME")"
+      if ! restic_repo_exists "$repository"; then
+        fail "No restic repository at $repository"
+      fi
+
+      if [[ "$force" != true ]]; then
+        warn "You are about to restore deployment '$RESTORE_REPO_NAME' from: $repository ($RESTORE_SNAPSHOT)"
+        warn "This will DROP and recreate all databases listed in the backup."
+
+        if ! gum confirm --default=No "Proceed with restore?"; then
+          info "Restore cancelled."
+          exit 0
+        fi
+      fi
+      prompted=true
+
+      extracted_tmp="$(mktemp -d "${working_dir}/restore-XXXXXX")"
+      backup_dir="$(restic_restore_snapshot "$repository" "$RESTORE_SNAPSHOT" "$extracted_tmp" "$RESTORE_REPO_NAME")"
+      restore_root="$extracted_tmp"
     fi
   fi
 

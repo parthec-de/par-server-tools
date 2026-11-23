@@ -176,6 +176,8 @@ parbackup ls --timestamps                  # <epoch>\t<key> per line
 
 Builtin backups download to a `.tar.gz`, restic snapshots restore into a directory. `ls` prints one reference per line, `<BACKUP_NAME>/<archive>` for builtin and `<BACKUP_NAME>/<short_id>` for restic. `--tree` applies to the builtin backend.
 
+A bucket can hold both kinds during a migration. The reference decides what `download` and `restore` do, the configured backend only decides what `create` writes.
+
 ### Retention
 
 After each successful `create`, parbackup removes backups beyond the retention of that `BACKUP_NAME`. The `RETENTION_DAYS` of the Parbackupfile takes precedence over the configuration.
