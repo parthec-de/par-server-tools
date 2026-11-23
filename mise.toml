@@ -2,6 +2,11 @@
 # restic 0.16 or newer, the backend relies on compression by default
 restic = "0.19.1"
 
+[tasks."test:par"]
+description = "Run par management command tests"
+dir = "par"
+run = "bats test/test.bats"
+
 [tasks."test:parbackup"]
 description = "Run parbackup bats integration tests"
 dir = "parbackup"
@@ -14,4 +19,4 @@ run = "bats test/test.bats"
 
 [tasks.test]
 description = "Run all tool test suites"
-depends = ["test:parbackup", "test:paralert"]
+depends = ["test:par", "test:parbackup", "test:paralert"]

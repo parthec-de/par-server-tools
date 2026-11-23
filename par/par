@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_name="par"
+script_version="1.0.0"
+manager_name="par"
+prefix="${PAR_PREFIX:-/usr/local}"
+bin_dir="${prefix}/bin"
+
+# The script lives in <repo>/par/par, the tools in <repo>/<tool>/<tool>.
+script_path="$(readlink -f "$0")"
+repo_root="$(cd "$(dirname "$script_path")/.." && pwd)"
+
+info() {
+  echo "$1"
+}
+
+warn() {
+  echo "WARN: $1" >&2
+}
+
+error() {
+  echo "ERROR: $1" >&2
+}
+
+fail() {
+  error "$1"
+  exit 1
+}
+
+print_help() {
+  cat << EOF
+$script_name v$script_version -- manage the par server tools
+
+Usage: par <command>
+
+Commands:
+  update      Pull the repository and link new tools into $bin_dir
+  version     Show the version of every tool
+  help        Show this help message
+
+Options:
+  -h, --help  Show help message
+
+Set PAR_PREFIX to install somewhere else than /usr/local.
+EOF
+}
+
+# Print "<name>\t<path>" for every tool below the repository root.
+tool_entries() {
+  local dir name
+
+  for dir in "$repo_root"/*/; do
+    name="$(basename "$dir")"
+    [[ -f "${dir}${name}" && -x "${dir}${name}" ]] || continue
+    printf '%s\t%s\n' "$name" "${dir}${name}"
+  done
+}
+
+# Read the version a tool declares in its source.
+tool_version() {
+  local version
+  version="$(sed -n 's/^script_version="\([^"]*\)"$/\1/p' "$1" | head -1)"
+  [[ -n "$version" ]] || return 1
+  echo "$version"
+}
+
+command_version() {
+  local name path version width=0
+  local -a rows=()
+
+  while IFS=$'\t' read -r name path; do
+    [[ "$name" == "$manager_name" ]] && continue
+
+    if version="$(tool_version "$path")"; then
+      rows+=("${name}:v${version}")
+    else
+      warn "No script_version in $path"
+      rows+=("${name}:unknown")
+    fi
+
+    ((${#name} > width)) && width="${#name}"
+  done < <(tool_entries)
+
+  if [[ ${#rows[@]} -eq 0 ]]; then
+    info "No tools found in $repo_root"
+    return 0
+  fi
+
+  local row
+  for row in "${rows[@]}"; do
+    printf '%-*s %s\n' "$((width + 1))" "${row%%:*}:" "${row#*:}"
+  done
+}
+
+command_update() {
+  if [[ -d "$repo_root/.git" ]]; then
+    info "Updating $repo_root ..."
+    git -C "$repo_root" pull --ff-only || warn "git pull failed, continuing with the current repo"
+  else
+    info "No git repository at $repo_root, skipping the pull"
+  fi
+
+  mkdir -p "$bin_dir" || fail "Cannot create $bin_dir, run as root or set PAR_PREFIX"
+  [[ -w "$bin_dir" ]] || fail "$bin_dir is not writable, run as root or set PAR_PREFIX"
+
+  local linked=0 skipped=0 name path link
+  while IFS=$'\t' read -r name path; do
+    link="${bin_dir}/${name}"
+
+    if [[ -L "$link" ]]; then
+      if [[ "$(readlink -f "$link")" == "$path" ]]; then
+        info "kept $link"
+      else
+        warn "skip $link (points to $(readlink "$link"))"
+        skipped=$((skipped + 1))
+      fi
+      continue
+    fi
+
+    if [[ -e "$link" ]]; then
+      warn "skip $link (not a symlink, remove it yourself)"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    ln -s "$path" "$link"
+    info "linked $link -> $path"
+    linked=$((linked + 1))
+  done < <(tool_entries)
+
+  info ""
+  info "Done, $linked new link(s), $skipped skipped."
+  echo ""
+  command_version
+}
+
+require_no_args() {
+  if [[ $# -eq 0 ]]; then
+    return 0
+  fi
+
+  case "$1" in
+    -h | --help)
+      print_help
+      exit 0
+      ;;
+  esac
+
+  error "Unexpected argument '$1' for '$subcommand'"
+  echo ""
+  print_help
+  exit 1
+}
+
+subcommand="${1:-}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+case "$subcommand" in
+  update)
+    require_no_args "$@"
+    command_update
+    ;;
+  version)
+    require_no_args "$@"
+    command_version
+    ;;
+  "" | help | -h | --help)
+    print_help
+    ;;
+  *)
+    error "Unknown command '$subcommand'"
+    echo ""
+    print_help
+    exit 1
+    ;;
+esac

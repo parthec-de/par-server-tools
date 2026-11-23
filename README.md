@@ -11,6 +11,9 @@ Back up and restore entire Docker Compose deployments with one config file and o
 - [**paralert**](./paralert/): email alerts over SMTP with mandatory TLS
   - parbackup reports failed backups through it
   - On its own it reports disk usage and failing commands or cron jobs
+- [**par**](./par/): manages the installed tools
+  - `par update` pulls the repository and links new tools
+  - `par version` lists the version of every tool
 
 ## Motivation
 
@@ -97,11 +100,19 @@ Override the install prefix with `PAR_PREFIX` (default `/usr/local`).
 
 ## Update
 
-Re-run the installer. It pulls the latest changes and leaves existing symlinks untouched:
+`par update` pulls the repository and links tools that appeared since the last run:
 
 ```bash
-/usr/local/share/par-server-tools/install.sh
+par update
 ```
+
+`par version` shows what is installed:
+
+```bash
+par version
+```
+
+Re-running `install.sh` does the same as `par update`.
 
 ## License
 
