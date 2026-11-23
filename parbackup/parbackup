@@ -953,7 +953,11 @@ restore_volume() {
   docker exec "$container" sh -c "rm -rf '${path:?}/'*" \
     || fail "Failed to clear '$path' in container '$container'"
   if [[ -f "$source_dir/volume.tar" ]]; then
-    docker cp - "$container:$path/" < "$source_dir/volume.tar" \
+    # docker cp reports 0 B for a tar stream from stdin, log the real size
+    local size
+    size="$(du -h "$source_dir/volume.tar" | cut -f1)"
+    info "  Copying $size of volume data into '$path'..."
+    docker cp - "$container:$path/" < "$source_dir/volume.tar" > /dev/null \
       || fail "docker cp failed for '$path' into container '$container'"
   else
     # Archives before v1.7.0 hold plain files without owner information
@@ -983,9 +987,15 @@ restore_volume_from_dir() {
   docker exec "$container" sh -c "rm -rf '${path:?}/'*" \
     || fail "Failed to clear '$path' in container '$container'"
 
+  # docker cp reports 0 B for a tar stream from stdin, log the real amount
+  local files size
+  files="$(find "$source_dir" -type f | wc -l)"
+  size="$(du -sh "$source_dir" | cut -f1)"
+  info "  Copying $files file(s), $size into '$path'..."
+
   # A tar stream keeps owner and mode, a plain docker cp resets them to the caller
   tar -C "$source_dir" -cf - . \
-    | docker cp - "$container:$path/" \
+    | docker cp - "$container:$path/" > /dev/null \
     || fail "docker cp failed for '$path' into container '$container'"
 
   info "  Volume restore complete for '$path'"

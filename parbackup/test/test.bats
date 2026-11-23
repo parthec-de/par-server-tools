@@ -1757,6 +1757,7 @@ EOF
   run restic_parbackup restore --force "$(oldest_snapshot_ref test_restic_bind)"
   [ "$status" -eq 0 ]
   [[ "$output" == *"Restore complete"* ]]
+  [[ "$output" == *"Copying 1 file(s)"* ]]
 
   run cat /tmp/parbackup-test-bind/hello.txt
   [[ "$output" == *"bind-data"* ]]
